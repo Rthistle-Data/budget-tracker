@@ -33,3 +33,5 @@ out/
 
 # misc
 coverage/
+*.db-wal
+*.db-shm
