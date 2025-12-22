@@ -1,0 +1,809 @@
+import express from "express";
+import cors from "cors";
+import "dotenv/config";
+
+import pkg from "@prisma/client";
+const { PrismaClient } = pkg;
+
+import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+
+const app = express();
+
+app.use(express.json());
+app.use(cors());
+
+// Prisma 7 + SQLite adapter connection
+const adapter = new PrismaBetterSqlite3({
+  url: process.env.DATABASE_URL,
+});
+const prisma = new PrismaClient({ adapter });
+
+// --------------------
+// Health
+// --------------------
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+// --------------------
+// Transactions
+// --------------------
+// GET /api/transactions?month=YYYY-MM
+app.get("/api/transactions", async (req, res) => {
+  const { month } = req.query;
+
+  const where = month ? { date: { startsWith: String(month) } } : {};
+
+  const items = await prisma.transaction.findMany({
+    where,
+    orderBy: [{ date: "desc" }, { createdAt: "desc" }],
+  });
+
+  res.json(items);
+});
+
+app.post("/api/transactions", async (req, res) => {
+  const { date, amount, category, merchant, account, note } = req.body;
+
+  if (!date || typeof date !== "string") {
+    return res.status(400).json({ error: "date required (YYYY-MM-DD)" });
+  }
+
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt === 0) {
+    return res.status(400).json({ error: "amount must be a non-zero number" });
+  }
+
+  if (!category || typeof category !== "string") {
+    return res.status(400).json({ error: "category required" });
+  }
+
+  const created = await prisma.transaction.create({
+    data: {
+      date,
+      amount: amt,
+      category,
+      merchant: String(merchant || ""),
+      account: String(account || ""),
+      note: String(note || ""),
+    },
+  });
+
+  res.status(201).json(created);
+});
+
+// --------------------
+// Budgets
+// ---------------
+
+// GET /api/budgets?month=YYYY-MM
+app.get("/api/budgets", async (req, res) => {
+  const { month } = req.query;
+  if (!month) return res.status(400).json({ error: "month required" });
+
+  const budgets = await prisma.budget.findMany({
+    where: { month: String(month) },
+    orderBy: { category: "asc" },
+  });
+
+  res.json(budgets);
+});
+
+// POST /api/budgets  { month, category, amount }
+app.post("/api/budgets", async (req, res) => {
+  const { month, category, amount } = req.body;
+
+  if (!month || typeof month !== "string") {
+    return res.status(400).json({ error: "month required" });
+  }
+  if (!category || typeof category !== "string") {
+    return res.status(400).json({ error: "category required" });
+  }
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt < 0) {
+    return res.status(400).json({ error: "amount must be a number >= 0" });
+  }
+
+  const saved = await prisma.budget.upsert({
+    where: { month_category: { month, category } },
+    update: { amount: amt },
+    create: { month, category, amount: amt },
+  });
+
+  res.status(201).json(saved);
+});
+// --------------------
+// Categories
+// --------------------
+app.get("/api/categories", async (req, res) => {
+  const cats = await prisma.category.findMany({
+    orderBy: { name: "asc" },
+  });
+  res.json(cats);
+});
+
+app.post("/api/categories", async (req, res) => {
+  const { name } = req.body;
+  const clean = String(name || "").trim();
+
+  if (!clean) return res.status(400).json({ error: "name required" });
+
+  try {
+    const created = await prisma.category.create({
+      data: { name: clean },
+    });
+    res.status(201).json(created);
+  } catch (e) {
+    // Unique constraint (duplicate category)
+    return res.status(409).json({ error: "category already exists" });
+  }
+});
+
+app.delete("/api/categories/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    await prisma.category.delete({ where: { id } });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(404).json({ error: "not found" });
+  }
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+// --------------------
+// Rules
+// --------------------
+app.get("/api/rules", async (req, res) => {
+  const rules = await prisma.rule.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(rules);
+});
+
+app.post("/api/rules", async (req, res) => {
+  const { match, category } = req.body;
+
+  if (!match || !category) {
+    return res.status(400).json({ error: "match and category required" });
+  }
+
+  const rule = await prisma.rule.create({
+    data: {
+      match: match.toLowerCase(),
+      category,
+    },
+  });
+
+  res.status(201).json(rule);
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  await prisma.rule.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+
+
+// --------------------
+// Start server (LAST)
+// --------------------
+const PORT = 4000;
+app.listen(PORT, () => {
+  console.log(`API running on http://localhost:${PORT}`);
+});

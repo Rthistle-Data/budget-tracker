@@ -1,0 +1,130 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  // ✅ no url here in Prisma 7
+}
+
+model Transaction {
+  id        String   @id @default(cuid())
+  date      String // YYYY-MM-DD
+  amount    Float
+  category  String
+  merchant  String
+  account   String
+  note      String   @default("")
+  createdAt DateTime @default(now())
+
+  // ✅ CSV import helpers
+  // importHash = stable hash of the raw row (or normalized signature) for dedupe
+  importHash String?
+  // source examples: "csv", "manual", "recurring"
+  source     String?
+
+  // ✅ recurring exact linking (portfolio-grade)
+  recurringId String?
+  recurring   Recurring? @relation(fields: [recurringId], references: [id], onDelete: SetNull)
+
+  // auth scoping
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  // ✅ Dedupe: allow multiple nulls, but prevent duplicates when importHash is set
+  @@unique([userId, importHash])
+  // ✅ Helpful query performance
+  @@index([userId, date])
+  @@index([userId, category])
+  @@index([userId, merchant])
+  @@index([userId, recurringId])
+}
+
+model Budget {
+  id       String @id @default(cuid())
+  month    String
+  category String
+  amount   Float
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  @@unique([userId, month, category])
+  @@index([userId, month])
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Rule {
+  id        String   @id @default(cuid())
+  match     String // substring to look for (store lowercase)
+  category  String // category to assign
+  createdAt DateTime @default(now())
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([userId, createdAt])
+}
+
+model Recurring {
+  id         String   @id @default(cuid())
+  name       String
+  amount     Float
+  category   String
+  merchant   String
+  account    String
+  note       String   @default("")
+  dayOfMonth Int // 1..28
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  // ✅ Back relation (paired with Transaction.recurringId)
+  transactions Transaction[]
+
+  @@index([userId])
+  @@index([userId, isActive])
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  passwordResetTokens PasswordResetToken[]
+
+  transactions Transaction[]
+  budgets      Budget[]
+  categories   Category[]
+  rules        Rule[]
+  recurring    Recurring[]
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}

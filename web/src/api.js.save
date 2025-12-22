@@ -1,0 +1,81 @@
+export async function getTransactions(month) {
+  const url = month ? `/api/transactions?month=${month}` : `/api/transactions`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Failed to load transactions");
+  return res.json();
+}
+
+export async function addTransaction(txn) {
+  const res = await fetch(`/api/transactions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(txn),
+  });
+  if (!res.ok) throw new Error("Failed to add transaction");
+  return res.json();
+}
+
+export async function getBudgets(month) {
+  if (!month) throw new Error("month is required for getBudgets()");
+  const res = await fetch(`/api/budgets?month=${month}`);
+  if (!res.ok) throw new Error("Failed to load budgets");
+  return res.json();
+}
+
+export async function saveBudget({ month, category, amount }) {
+  const res = await fetch(`/api/budgets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ month, category, amount }),
+  });
+  if (!res.ok) throw new Error("Failed to save budget");
+  return res.json();
+}
+export async function getCategories() {
+  const res = await fetch("/api/categories");
+  if (!res.ok) throw new Error("Failed to load categories");
+  return res.json();
+}
+
+export async function addCategory(name) {
+  const res = await fetch("/api/categories", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
+  if (res.status === 409) throw new Error("Category already exists");
+  if (!res.ok) throw new Error("Failed to add category");
+  return res.json();
+}
+
+export async function deleteCategory(id) {
+  const res = await fetch(`/api/categories/${id}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error("Failed to delete category");
+  return res.json();
+}
+
+export async function getRules() {
+  const res = await fetch("/api/rules");
+  if (!res.ok) throw new Error("Failed to load rules");
+  return res.json();
+}
+
+export async function addRule(match, category) {
+  const res = await fetch("/api/rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ match, category }),
+  });
+  if (!res.ok) throw new Error("Failed to add rule");
+  return res.json();
+}
+
+export async function deleteRule(id) {
+  const res = await fetch(`/api/rules/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete rule");
+  return res.json();
+}
+
