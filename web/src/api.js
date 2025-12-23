@@ -35,9 +35,13 @@ export async function apiFetch(path, options = {}) {
    Auth / Session
 ---------------------------- */
 
-export function me() {
-  return apiFetch("/api/auth/me");
+export async function me() {
+  const res = await fetch("http://localhost:4000/me", {
+    credentials: "include",
+  });
+  return res.json();
 }
+
 
 export function logout() {
   return apiFetch("/api/auth/logout", { method: "POST" });

@@ -1,7 +1,6 @@
 // server/index.js
 import "dotenv/config";
 import express from "express";
-import cors from "cors";
 import session from "express-session";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
@@ -52,17 +51,42 @@ function isAllowedOrigin(origin) {
   return false;
 }
 
+import cors from "cors";
+
+const DEV_ALLOWED = new Set([
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:4173",   // vite preview sometimes
+  "http://127.0.0.1:4173",
+]);
+
+// Optional: allow one deployed origin via env
+// e.g. CLIENT_ORIGIN=https://your-frontend.onrender.com
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN?.trim();
+if (CLIENT_ORIGIN) DEV_ALLOWED.add(CLIENT_ORIGIN);
+
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (isAllowedOrigin(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked: ${origin}`));
+      // allow server-to-server / curl / postman (no Origin header)
+      if (!origin) return cb(null, true);
+
+      try {
+        // normalize origin like "http://localhost:5173"
+        const u = new URL(origin);
+        const normalized = `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+
+        if (DEV_ALLOWED.has(normalized)) return cb(null, true);
+
+        return cb(new Error(`CORS blocked: ${origin}`));
+      } catch {
+        return cb(new Error(`CORS invalid origin: ${origin}`));
+      }
     },
     credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
 
 // ALWAYS answer preflight
 app.options("*", cors());
@@ -289,6 +313,6 @@ app.post("/api/ai/rule-suggestion", requireAuth, async (req, res) => {
 const PORT = Number(process.env.PORT || 4000);
 app.listen(PORT, () => {
   console.log(`API running on http://localhost:${PORT}`);
-  console.log(`CLIENT_ORIGIN: ${CLIENT_ORIGIN}`);
+
   console.log(`NODE_ENV: ${process.env.NODE_ENV || "development"}`);
 });
