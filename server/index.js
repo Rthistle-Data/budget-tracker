@@ -7,7 +7,9 @@ import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import OpenAI from "openai";
 
-import { PrismaClient } from "@prisma/client";
+import pkg from "@prisma/client";
+const { PrismaClient } = pkg;
+
 import { PrismaPg } from "@prisma/adapter-pg";
 const app = express();
 
