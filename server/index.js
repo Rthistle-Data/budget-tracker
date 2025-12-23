@@ -33,20 +33,41 @@ const adapter = new PrismaPg({ pool });
 const prisma = new PrismaClient({ adapter });
 
 // --------------------
-// Middleware
+// Middleware (CORS must be BEFORE json + routes)
 // --------------------
-app.use(express.json());
-
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
-
 app.set("trust proxy", 1);
+
+// Allow BOTH production + any Vercel preview deployments
+const allowedOrigins = [
+  "https://regansportfolio.vercel.app",
+];
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // curl/postman/health checks
+  if (allowedOrigins.includes(origin)) return true;
+  // allow Vercel preview URLs
+  if (/^https:\/\/budget-tracker-.*-rthistle-datas-projects\.vercel\.app$/.test(origin)) return true;
+  // if you ever deploy under different preview naming, broaden:
+  // if (/^https:\/\/.*\.vercel\.app$/.test(origin)) return true;
+  return false;
+}
 
 app.use(
   cors({
-    origin: CLIENT_ORIGIN,
+    origin: (origin, cb) => {
+      if (isAllowedOrigin(origin)) return cb(null, true);
+      return cb(new Error(`CORS blocked: ${origin}`));
+    },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+// ALWAYS answer preflight
+app.options("*", cors());
+
+app.use(express.json());
 
 app.use(
   session({
@@ -55,11 +76,13 @@ app.use(
     resave: false,
     saveUninitialized: false,
     rolling: true,
+    proxy: true,
     cookie: {
       httpOnly: true,
+      // Cross-site cookie (Vercel -> Render)
       sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       secure: process.env.NODE_ENV === "production",
-      maxAge: 1000 * 60 * 60 * 24 * 14, // 14 days
+      maxAge: 1000 * 60 * 60 * 24 * 14,
     },
   })
 );
