@@ -35,12 +35,10 @@ export async function apiFetch(path, options = {}) {
    Auth / Session
 ---------------------------- */
 
-export async function me() {
-  const res = await fetch("http://localhost:4000/me", {
-    credentials: "include",
-  });
-  return res.json();
+export function me() {
+  return apiFetch("/api/auth/me", { method: "GET" });
 }
+
 
 
 export function logout() {
@@ -175,12 +173,13 @@ export function getRules() {
   return apiFetch("/api/rules", { method: "GET", headers: {} });
 }
 
-export function addRule(match, category) {
+export function addRule(contains, categoryId, name = "") {
   return apiFetch("/api/rules", {
     method: "POST",
-    body: JSON.stringify({ match, category }),
+    body: JSON.stringify({ contains, categoryId, name }),
   });
 }
+
 
 export function deleteRule(id) {
   return apiFetch(`/api/rules/${id}`, { method: "DELETE" });

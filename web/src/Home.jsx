@@ -46,6 +46,36 @@ import {
 } from "./api";
 
 /* ---------------------------
+   Helpers (safe response shapes)
+---------------------------- */
+
+function toArray(value, key) {
+  // Supports:
+  // - direct array
+  // - { [key]: array }
+  // - null/undefined
+  if (Array.isArray(value)) return value;
+  if (value && key && Array.isArray(value[key])) return value[key];
+  return [];
+}
+
+function monthNow() {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}`;
+}
+
+function isoDateForMonthDay(month, day) {
+  const dd = String(day).padStart(2, "0");
+  return `${month}-${dd}`;
+}
+
+function money(n) {
+  const x = Number(n) || 0;
+  return x.toFixed(2);
+}
+
+/* ---------------------------
    CSV Import Card
 ---------------------------- */
 
@@ -123,13 +153,14 @@ function CsvImportCard({ month, onImported }) {
       const filtered = rows.filter((r) => r.date && r.date.startsWith(month));
       const toSend = filtered.length ? filtered : rows;
 
+      // Your server route expects: { rows, source }
       const result = await importCsv(toSend, file.name);
 
-      setMsg(
-        `Imported: ${result.inserted} • Skipped duplicates: ${result.skippedDuplicates} • Errors: ${
-          result.errors?.length || 0
-        }`
-      );
+      // Your server returns: { ok, inserted, skipped }
+      const inserted = Number(result?.inserted) || 0;
+      const skipped = Number(result?.skipped) || 0;
+
+      setMsg(`Imported: ${inserted} • Skipped: ${skipped}`);
 
       await onImported?.();
     } catch (e) {
@@ -176,30 +207,6 @@ function CsvImportCard({ month, onImported }) {
       </div>
     </div>
   );
-}
-
-/* ---------------------------
-   Helpers
----------------------------- */
-
-function monthNow() {
-  const d = new Date();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${d.getFullYear()}-${mm}`;
-}
-
-function isoDateForMonthDay(month, day) {
-  const dd = String(day).padStart(2, "0");
-  return `${month}-${dd}`;
-}
-
-function sameMoney(a, b) {
-  return Math.abs((Number(a) || 0) - (Number(b) || 0)) < 0.01;
-}
-
-function money(n) {
-  const x = Number(n) || 0;
-  return x.toFixed(2);
 }
 
 /* ---------------------------
@@ -257,7 +264,6 @@ export default function Home() {
   const [aiSuggestion, setAiSuggestion] = useState(null);
   const [aiTx, setAiTx] = useState(null);
 
-  // alias so we never confuse ourselves
   const addRuleApi = addRule;
 
   async function openAiRule(tx) {
@@ -280,7 +286,11 @@ export default function Home() {
   async function confirmAiRule() {
     if (!aiSuggestion) return;
     await addRuleApi(aiSuggestion.match, aiSuggestion.category);
-    setRules(await getRules());
+
+    // rule list can be either array or {rules:[]}
+    const r = await getRules();
+    setRules(toArray(r, "rules"));
+
     setAiOpen(false);
     setAiSuggestion(null);
     setAiTx(null);
@@ -293,7 +303,7 @@ export default function Home() {
     (async () => {
       try {
         const data = await me();
-        setUser(data.user);
+        setUser(data?.user || null);
       } catch {
         setUser(null);
       } finally {
@@ -303,11 +313,12 @@ export default function Home() {
   }, []);
 
   // --------------------
-  // Load all data
+  // Load all data (defensive)
   // --------------------
   async function loadAll() {
     setLoading(true);
     setErr("");
+
     try {
       const [t, b, c, r, rec] = await Promise.all([
         getTransactions(month),
@@ -316,11 +327,12 @@ export default function Home() {
         getRules(),
         getRecurring(),
       ]);
-      setTxns(t);
-      setBudgets(b);
-      setCategoriesList(c);
-      setRules(r);
-      setRecurring(rec);
+
+      setTxns(toArray(t, "transactions"));
+      setBudgets(toArray(b, "budgets"));
+      setCategoriesList(toArray(c, "categories"));
+      setRules(toArray(r, "rules"));
+      setRecurring(toArray(rec, "recurring"));
     } catch (e) {
       setErr(String(e?.message || e));
     } finally {
@@ -334,40 +346,47 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month, user]);
 
+  // Always safe arrays
+  const safeTxns = Array.isArray(txns) ? txns : [];
+  const safeBudgets = Array.isArray(budgets) ? budgets : [];
+  const safeCategoriesList = Array.isArray(categoriesList) ? categoriesList : [];
+  const safeRules = Array.isArray(rules) ? rules : [];
+  const safeRecurring = Array.isArray(recurring) ? recurring : [];
+
   // --------------------
   // Derived data
   // --------------------
   const summary = useMemo(() => {
-    const income = txns.filter((x) => x.amount > 0).reduce((a, b) => a + b.amount, 0);
-    const spend = txns.filter((x) => x.amount < 0).reduce((a, b) => a + b.amount, 0);
+    const income = safeTxns.filter((x) => Number(x.amount) > 0).reduce((a, b) => a + (Number(b.amount) || 0), 0);
+    const spend = safeTxns.filter((x) => Number(x.amount) < 0).reduce((a, b) => a + (Number(b.amount) || 0), 0);
     return { income, spend, net: income + spend };
-  }, [txns]);
+  }, [safeTxns]);
 
   const spentByCategory = useMemo(() => {
     const map = new Map();
-    for (const t of txns) {
+    for (const t of safeTxns) {
       const amt = Number(t.amount) || 0;
       if (amt >= 0) continue;
       const cat = t.category || "Uncategorized";
       map.set(cat, (map.get(cat) || 0) + Math.abs(amt));
     }
     return map;
-  }, [txns]);
+  }, [safeTxns]);
 
   const categories = useMemo(() => {
     const set = new Set();
-    for (const c of categoriesList) set.add(c.name);
-    for (const b of budgets) set.add(b.category);
-    for (const t of txns) set.add(t.category || "Uncategorized");
+    for (const c of safeCategoriesList) set.add(c.name);
+    for (const b of safeBudgets) set.add(b.category);
+    for (const t of safeTxns) set.add(t.category || "Uncategorized");
     set.add("Uncategorized");
     return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [categoriesList, budgets, txns]);
+  }, [safeCategoriesList, safeBudgets, safeTxns]);
 
   const budgetMap = useMemo(() => {
     const m = new Map();
-    for (const b of budgets) m.set(b.category, Number(b.amount) || 0);
+    for (const b of safeBudgets) m.set(b.category, Number(b.amount) || 0);
     return m;
-  }, [budgets]);
+  }, [safeBudgets]);
 
   const budgetRows = useMemo(() => {
     return categories.map((cat) => {
@@ -402,10 +421,10 @@ export default function Home() {
 
   // ✅ Exact matching using recurringId
   const recurringForecast = useMemo(() => {
-    const active = (recurring || []).filter((x) => x.isActive !== 0 && x.isActive !== false);
+    const active = safeRecurring.filter((x) => x.isActive !== 0 && x.isActive !== false);
 
     function isApplied(recItem) {
-      return (txns || []).some((t) => t.recurringId === recItem.id);
+      return safeTxns.some((t) => t.recurringId === recItem.id);
     }
 
     const rows = active
@@ -436,7 +455,7 @@ export default function Home() {
       .reduce((sum, x) => sum + x.amount, 0);
 
     return { rows, upcoming, upcomingExpenseTotal, upcomingIncomeTotal };
-  }, [recurring, txns, month]);
+  }, [safeRecurring, safeTxns, month]);
 
   // --------------------
   // Actions
@@ -482,7 +501,15 @@ export default function Home() {
     };
 
     const updated = await updateTransaction(editTx.id, patch);
-    setTxns((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+
+    // Some APIs return { transaction }, others return transaction directly
+    const updatedTx = updated?.transaction ?? updated;
+
+    setTxns((prev) => {
+      const arr = Array.isArray(prev) ? prev : [];
+      return arr.map((t) => (t.id === updatedTx.id ? updatedTx : t));
+    });
+
     setEditOpen(false);
     setEditTx(null);
   }
@@ -491,8 +518,8 @@ export default function Home() {
     const ok = confirm("Delete this transaction?");
     if (!ok) return;
 
-    const snapshot = txns;
-    setTxns((prev) => prev.filter((t) => t.id !== id));
+    const snapshot = safeTxns;
+    setTxns((prev) => (Array.isArray(prev) ? prev.filter((t) => t.id !== id) : []));
 
     try {
       await deleteTransaction(id);
@@ -646,7 +673,6 @@ export default function Home() {
                       <KPI label={`Net · ${month}`} value={`$${money(summary.net)}`} />
                     </div>
 
-                    {/* ✅ CSV Import visible here */}
                     <CsvImportCard month={month} onImported={loadAll} />
 
                     <div className="card" style={{ borderRadius: 16 }}>
@@ -724,7 +750,7 @@ export default function Home() {
                           </tr>
                         </thead>
                         <tbody>
-                          {txns.map((t) => (
+                          {safeTxns.map((t) => (
                             <tr key={t.id}>
                               <td>{t.date}</td>
                               <td>{t.merchant}</td>
@@ -746,7 +772,7 @@ export default function Home() {
                             </tr>
                           ))}
 
-                          {txns.length === 0 && (
+                          {safeTxns.length === 0 && (
                             <tr>
                               <td colSpan={7} style={{ color: "var(--muted)", textAlign: "center", padding: 18 }}>
                                 No transactions for {month}.
@@ -782,45 +808,52 @@ export default function Home() {
                   <BudgetsPanel month={month} rows={budgetRows} onSave={onSaveBudget} />
                 ) : tab === "categories" ? (
                   <CategoriesPanel
-                    items={categoriesList}
+                    items={safeCategoriesList}
                     onAdd={async (name) => {
                       await addCategory(name);
-                      setCategoriesList(await getCategories());
+                      const c = await getCategories();
+                      setCategoriesList(toArray(c, "categories"));
                     }}
                     onDelete={async (id) => {
                       await deleteCategory(id);
-                      setCategoriesList(await getCategories());
+                      const c = await getCategories();
+                      setCategoriesList(toArray(c, "categories"));
                     }}
                   />
                 ) : tab === "rules" ? (
                   <RulesPanel
-                    rules={rules}
+                    rules={safeRules}
                     categories={categories}
                     onAdd={async (match, cat) => {
                       await addRuleApi(match, cat);
-                      setRules(await getRules());
+                      const r = await getRules();
+                      setRules(toArray(r, "rules"));
                     }}
                     onDelete={async (id) => {
                       await deleteRule(id);
-                      setRules(await getRules());
+                      const r = await getRules();
+                      setRules(toArray(r, "rules"));
                     }}
                   />
                 ) : (
                   <RecurringPanel
                     month={month}
                     categories={categories}
-                    items={recurring}
+                    items={safeRecurring}
                     onAdd={async (payload) => {
                       await addRecurring(payload);
-                      setRecurring(await getRecurring());
+                      const rec = await getRecurring();
+                      setRecurring(toArray(rec, "recurring"));
                     }}
                     onToggle={async (id, isActive) => {
                       await toggleRecurring(id, isActive);
-                      setRecurring(await getRecurring());
+                      const rec = await getRecurring();
+                      setRecurring(toArray(rec, "recurring"));
                     }}
                     onDelete={async (id) => {
                       await deleteRecurring(id);
-                      setRecurring(await getRecurring());
+                      const rec = await getRecurring();
+                      setRecurring(toArray(rec, "recurring"));
                     }}
                     onGenerate={async () => {
                       const result = await generateRecurring(month);
@@ -906,19 +939,9 @@ function AiRuleModal({ open, loading, error, suggestion, tx, onClose, onConfirm 
                 <b>Confidence:</b> {(suggestion.confidence * 100).toFixed(0)}%
               </div>
             )}
-            {suggestion.reason && <div style={{ color: "var(--muted)", marginTop: 4 }}>{suggestion.reason}</div>}
-            {Array.isArray(suggestion.warnings) && suggestion.warnings.length > 0 && (
-              <div style={{ marginTop: 4 }}>
-                {suggestion.warnings.map((w, i) => (
-                  <div key={i} style={{ color: "var(--warning)", fontSize: 13 }}>
-                    ⚠ {w}
-                  </div>
-                ))}
-              </div>
-            )}
-            {typeof suggestion.testHits === "number" && (
-              <div style={{ fontSize: 13, color: "var(--muted)" }}>
-                This would match <b>{suggestion.testHits}</b> existing transaction(s).
+            {(suggestion.reasoning || suggestion.reason) && (
+              <div style={{ color: "var(--muted)", marginTop: 4 }}>
+                {suggestion.reasoning || suggestion.reason}
               </div>
             )}
           </div>
@@ -939,7 +962,7 @@ function AiRuleModal({ open, loading, error, suggestion, tx, onClose, onConfirm 
 }
 
 /* ---------------------------
-   Panels (unchanged from your style)
+   Panels (same as yours)
 ---------------------------- */
 
 function DashboardPanel({ month, income, spend, net, topCategories, budgetProgress, recurringForecast }) {
@@ -1011,7 +1034,7 @@ function DashboardPanel({ month, income, spend, net, topCategories, budgetProgre
                 </div>
 
                 <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13 }}>
-                  Forecast spend: <b>${money(forecastSpend)}</b> (current spend + upcoming recurring expenses)
+                  Forecast spend: <b>${money(forecastSpend)}</b>
                 </div>
               </>
             );
@@ -1073,30 +1096,18 @@ function DashboardPanel({ month, income, spend, net, topCategories, budgetProgre
                 const pctRaw = hasBudget ? (spent / budgeted) * 100 : 0;
                 const fill = hasBudget ? Math.min(120, Math.max(0, pctRaw)) : 0;
 
-                const status = !hasBudget ? "none" : pctRaw < 75 ? "good" : pctRaw <= 100 ? "warn" : "bad";
                 const remaining = budgeted - spent;
-
-                const barColor =
-                  status === "good"
-                    ? "rgba(61,220,151,0.60)"
-                    : status === "warn"
-                    ? "rgba(255,193,7,0.75)"
-                    : status === "bad"
-                    ? "rgba(255,77,109,0.70)"
-                    : "rgba(255,255,255,0.18)";
-
-                const label = hasBudget
-                  ? `${big(spent)} / ${big(budgeted)} · ${pctRaw.toFixed(0)}% · ${
-                      remaining >= 0 ? `${big(remaining)} left` : `${big(-remaining)} over`
-                    }`
-                  : `${big(spent)} spent (no budget)`;
 
                 return (
                   <div key={r.cat} style={{ display: "grid", gap: 6 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <div style={{ fontWeight: 800 }}>{r.cat}</div>
-                      <div style={{ marginLeft: "auto", color: status === "bad" ? "var(--danger)" : "var(--muted)" }}>
-                        {label}
+                      <div style={{ marginLeft: "auto", color: "var(--muted)" }}>
+                        {hasBudget
+                          ? `${big(spent)} / ${big(budgeted)} · ${pctRaw.toFixed(0)}% · ${
+                              remaining >= 0 ? `${big(remaining)} left` : `${big(-remaining)} over`
+                            }`
+                          : `${big(spent)} spent (no budget)`}
                       </div>
                     </div>
 
@@ -1113,7 +1124,7 @@ function DashboardPanel({ month, income, spend, net, topCategories, budgetProgre
                         style={{
                           height: "100%",
                           width: `${fill}%`,
-                          background: barColor,
+                          background: "rgba(255,255,255,0.18)",
                           transition: "width 180ms ease",
                         }}
                       />
@@ -1122,10 +1133,6 @@ function DashboardPanel({ month, income, spend, net, topCategories, budgetProgre
                 );
               })
             )}
-          </div>
-
-          <div style={{ marginTop: 12, color: "var(--muted)", fontSize: 13 }}>
-            Tip: Set budgets for your top categories to get meaningful progress bars.
           </div>
         </div>
       </div>
@@ -1475,3 +1482,4 @@ function AuthScreen({ onAuthed }) {
     </div>
   );
 }
+
