@@ -1,17 +1,19 @@
 // web/src/api.js
-const API_BASE =
-  (import.meta.env.VITE_API_BASE || "http://localhost:4000").replace(/\/$/, "");
+// Single, consistent API layer using cookie sessions.
+// Works locally (Vite proxy) AND in production (Vercel -> Render) via VITE_API_BASE.
 
-async function apiFetch(path, options = {}) {
-  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+const API_BASE = import.meta.env.VITE_API_BASE || ""; 
+// Local dev: "" lets Vite proxy /api -> http://localhost:4000
+// Prod: set VITE_API_BASE = "https://budget-tracker-ntji.onrender.com"
 
-  const res = await fetch(url, {
+export async function apiFetch(path, options = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
-    ...options,
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {}),
     },
+    ...options,
   });
 
   const text = await res.text();
@@ -23,44 +25,67 @@ async function apiFetch(path, options = {}) {
   }
 
   if (!res.ok) {
-    throw new Error(data?.error || data?.message || `Request failed (${res.status})`);
+    throw new Error(data?.error || data?.message || "Request failed");
   }
+
   return data;
 }
 
 /* ---------------------------
    Auth / Session
 ---------------------------- */
-export const me = () => apiFetch("/api/auth/me");
-export const logout = () => apiFetch("/api/auth/logout", { method: "POST" });
 
-export const register = (email, password) =>
-  apiFetch("/api/auth/register", {
+export function me() {
+  return apiFetch("/api/auth/me");
+}
+
+export function logout() {
+  return apiFetch("/api/auth/logout", { method: "POST" });
+}
+
+export function register(email, password) {
+  return apiFetch("/api/auth/register", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
+}
 
-export const login = (email, password) =>
-  apiFetch("/api/auth/login", {
+export function login(email, password) {
+  return apiFetch("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
+}
 
-export const forgotPassword = (email) =>
-  apiFetch("/api/auth/forgot-password", {
+export function forgotPassword(email) {
+  return apiFetch("/api/auth/forgot-password", {
     method: "POST",
     body: JSON.stringify({ email }),
   });
+}
 
-export const resetPassword = (email, token, newPassword) =>
-  apiFetch("/api/auth/reset-password", {
+export function resetPassword(email, token, newPassword) {
+  return apiFetch("/api/auth/reset-password", {
     method: "POST",
     body: JSON.stringify({ email, token, newPassword }),
   });
+}
+
+/* ---------------------------
+   Profile
+---------------------------- */
+
+export function changePassword(currentPassword, newPassword) {
+  return apiFetch("/api/profile/change-password", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
 
 /* ---------------------------
    Transactions
 ---------------------------- */
+
 export function getTransactions(month) {
   const url = month
     ? `/api/transactions?month=${encodeURIComponent(month)}`
@@ -68,18 +93,28 @@ export function getTransactions(month) {
   return apiFetch(url, { method: "GET", headers: {} });
 }
 
-export const addTransaction = (txn) =>
-  apiFetch("/api/transactions", { method: "POST", body: JSON.stringify(txn) });
+export function addTransaction(txn) {
+  return apiFetch("/api/transactions", {
+    method: "POST",
+    body: JSON.stringify(txn),
+  });
+}
 
-export const updateTransaction = (id, patch) =>
-  apiFetch(`/api/transactions/${id}`, { method: "PUT", body: JSON.stringify(patch) });
+export function updateTransaction(id, patch) {
+  return apiFetch(`/api/transactions/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
 
-export const deleteTransaction = (id) =>
-  apiFetch(`/api/transactions/${id}`, { method: "DELETE" });
+export function deleteTransaction(id) {
+  return apiFetch(`/api/transactions/${id}`, { method: "DELETE" });
+}
 
 /* ---------------------------
    Budgets
 ---------------------------- */
+
 export function getBudgets(month) {
   if (!month) throw new Error("month is required for getBudgets()");
   return apiFetch(`/api/budgets?month=${encodeURIComponent(month)}`, {
@@ -88,82 +123,119 @@ export function getBudgets(month) {
   });
 }
 
-export const saveBudget = ({ month, category, amount }) =>
-  apiFetch("/api/budgets", {
+export function saveBudget({ month, category, amount }) {
+  return apiFetch("/api/budgets", {
     method: "POST",
     body: JSON.stringify({ month, category, amount }),
   });
+}
 
 /* ---------------------------
    Categories
 ---------------------------- */
-export const getCategories = () => apiFetch("/api/categories", { method: "GET", headers: {} });
 
-export async function addCategory(name) {
-  // Custom 409 message
-  try {
-    return await apiFetch("/api/categories", {
-      method: "POST",
-      body: JSON.stringify({ name }),
-    });
-  } catch (e) {
-    if (String(e.message).includes("(409)")) throw new Error("Category already exists");
-    throw e;
-  }
+export function getCategories() {
+  return apiFetch("/api/categories", { method: "GET", headers: {} });
 }
 
-export const deleteCategory = (id) =>
-  apiFetch(`/api/categories/${id}`, { method: "DELETE" });
+export async function addCategory(name) {
+  const res = await fetch(`${API_BASE}/api/categories`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = text ? { error: text } : {};
+  }
+
+  if (res.status === 409) throw new Error("Category already exists");
+  if (!res.ok) throw new Error(data?.error || "Failed to add category");
+  return data;
+}
+
+export function deleteCategory(id) {
+  return apiFetch(`/api/categories/${id}`, { method: "DELETE" });
+}
 
 /* ---------------------------
    Rules
 ---------------------------- */
-export const getRules = () => apiFetch("/api/rules", { method: "GET", headers: {} });
 
-export const addRule = (match, category) =>
-  apiFetch("/api/rules", { method: "POST", body: JSON.stringify({ match, category }) });
+export function getRules() {
+  return apiFetch("/api/rules", { method: "GET", headers: {} });
+}
 
-export const deleteRule = (id) =>
-  apiFetch(`/api/rules/${id}`, { method: "DELETE" });
+export function addRule(match, category) {
+  return apiFetch("/api/rules", {
+    method: "POST",
+    body: JSON.stringify({ match, category }),
+  });
+}
+
+export function deleteRule(id) {
+  return apiFetch(`/api/rules/${id}`, { method: "DELETE" });
+}
 
 /* ---------------------------
-   AI
+   AI: Rule Suggestion
 ---------------------------- */
-export const suggestRule = (transactionId) =>
-  apiFetch(`/api/ai/suggest-rule?transactionId=${encodeURIComponent(transactionId)}`);
+
+export function suggestRule(transactionId) {
+  return apiFetch(
+    `/api/ai/suggest-rule?transactionId=${encodeURIComponent(transactionId)}`
+  );
+}
 
 /* ---------------------------
    Recurring
 ---------------------------- */
-export const getRecurring = () => apiFetch("/api/recurring", { method: "GET", headers: {} });
 
-export const addRecurring = (payload) =>
-  apiFetch("/api/recurring", { method: "POST", body: JSON.stringify(payload) });
+export function getRecurring() {
+  return apiFetch("/api/recurring", { method: "GET", headers: {} });
+}
 
-export const toggleRecurring = (id, isActive) =>
-  apiFetch(`/api/recurring/${id}`, {
+export function addRecurring(payload) {
+  return apiFetch("/api/recurring", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function toggleRecurring(id, isActive) {
+  return apiFetch(`/api/recurring/${id}`, {
     method: "PATCH",
     body: JSON.stringify({ isActive }),
   });
+}
 
-export const deleteRecurring = (id) =>
-  apiFetch(`/api/recurring/${id}`, { method: "DELETE" });
+export function deleteRecurring(id) {
+  return apiFetch(`/api/recurring/${id}`, { method: "DELETE" });
+}
 
-export const generateRecurring = (month) =>
-  apiFetch(`/api/recurring/generate?month=${encodeURIComponent(month)}`, {
+export function generateRecurring(month) {
+  return apiFetch(`/api/recurring/generate?month=${encodeURIComponent(month)}`, {
     method: "POST",
     headers: {},
   });
+}
 
-/* ---------------------------
-   CSV import
----------------------------- */
-export const importCsv = (rows, source = "csv") =>
-  apiFetch("/api/import/csv", { method: "POST", body: JSON.stringify({ rows, source }) });
+export function importCsv(rows, source = "csv") {
+  return apiFetch("/api/import/csv", {
+    method: "POST",
+    body: JSON.stringify({ rows, source }),
+  });
+}
 
-export const dryRunImport = ({ month, rows, mapping }) =>
-  apiFetch("/api/import/csv/dry-run", {
+export function dryRunImport({ month, rows, mapping }) {
+  return apiFetch("/api/import/csv/dry-run", {
     method: "POST",
     body: JSON.stringify({ month, rows, mapping }),
   });
+}
 
