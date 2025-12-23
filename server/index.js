@@ -7,16 +7,21 @@ import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import OpenAI from "openai";
 
+import pg from "pg";
+const { Pool } = pg;
+
 import pkg from "@prisma/client";
 const { PrismaClient } = pkg;
 
 import { PrismaPg } from "@prisma/adapter-pg";
-const app = express();
 
-const adapter = new PrismaPg({
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  // optional but often helpful on hosted Postgres:
+  // ssl: { rejectUnauthorized: false },
 });
 
+const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 

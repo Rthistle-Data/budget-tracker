@@ -1,28 +1,51 @@
 // web/src/api.js
-// Single, consistent API layer using /api/* and cookie sessions.
+// Single, consistent API layer using cookie sessions.
+// Works with local dev + deployed Vercel (frontend) -> Render (backend).
 
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000";
+
+/**
+ * apiFetch("/api/...", { method, body, headers })
+ * - Always includes cookies for session auth
+ * - Parses JSON safely (even if server returns text)
+ * - Throws a nice Error() on non-2xx responses
+ */
 export async function apiFetch(path, options = {}) {
-  const res = await fetch(path, {
+  const url =
+    path.startsWith("http://") || path.startsWith("https://")
+      ? path
+      : `${API_BASE}${path}`;
+
+  const res = await fetch(url, {
     credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
     ...options,
+    headers: {
+      ...(options.headers || {}),
+      // Only set JSON content-type if caller didn't override
+      ...(options.body != null && !(options.body instanceof FormData)
+        ? { "Content-Type": "application/json" }
+        : {}),
+    },
   });
 
   const text = await res.text();
+
   let data = {};
   try {
     data = text ? JSON.parse(text) : {};
   } catch {
-    // if server returns plain text or empty, keep data as {}
     data = text ? { error: text } : {};
   }
 
   if (!res.ok) {
-    throw new Error(data?.error || data?.message || "Request failed");
+    // Prefer server-provided error messages
+    const msg =
+      data?.error ||
+      data?.message ||
+      `Request failed (${res.status} ${res.statusText})`;
+    throw new Error(msg);
   }
+
   return data;
 }
 
@@ -38,14 +61,14 @@ export function logout() {
   return apiFetch("/api/auth/logout", { method: "POST" });
 }
 
-export async function register(email, password) {
+export function register(email, password) {
   return apiFetch("/api/auth/register", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
 }
 
-export async function login(email, password) {
+export function login(email, password) {
   return apiFetch("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
@@ -85,7 +108,7 @@ export function getTransactions(month) {
   const url = month
     ? `/api/transactions?month=${encodeURIComponent(month)}`
     : `/api/transactions`;
-  return apiFetch(url, { method: "GET", headers: {} });
+  return apiFetch(url);
 }
 
 export function addTransaction(txn) {
@@ -112,10 +135,7 @@ export function deleteTransaction(id) {
 
 export function getBudgets(month) {
   if (!month) throw new Error("month is required for getBudgets()");
-  return apiFetch(`/api/budgets?month=${encodeURIComponent(month)}`, {
-    method: "GET",
-    headers: {},
-  });
+  return apiFetch(`/api/budgets?month=${encodeURIComponent(month)}`);
 }
 
 export function saveBudget({ month, category, amount }) {
@@ -130,29 +150,23 @@ export function saveBudget({ month, category, amount }) {
 ---------------------------- */
 
 export function getCategories() {
-  return apiFetch("/api/categories", { method: "GET", headers: {} });
+  return apiFetch("/api/categories");
 }
 
 export async function addCategory(name) {
-  // We want the 409 "already exists" message to be nice
-  const res = await fetch("/api/categories", {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-
-  const text = await res.text();
-  let data = {};
   try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = text ? { error: text } : {};
+    return await apiFetch("/api/categories", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  } catch (e) {
+    // Keep your friendly 409 message
+    if (String(e?.message || "").toLowerCase().includes("409")) {
+      throw new Error("Category already exists");
+    }
+    // If your server returns {error:"Category already exists"} it will already be nice.
+    throw e;
   }
-
-  if (res.status === 409) throw new Error("Category already exists");
-  if (!res.ok) throw new Error(data?.error || "Failed to add category");
-  return data;
 }
 
 export function deleteCategory(id) {
@@ -164,7 +178,7 @@ export function deleteCategory(id) {
 ---------------------------- */
 
 export function getRules() {
-  return apiFetch("/api/rules", { method: "GET", headers: {} });
+  return apiFetch("/api/rules");
 }
 
 export function addRule(match, category) {
@@ -179,7 +193,7 @@ export function deleteRule(id) {
 }
 
 /* ---------------------------
-   AI: Rule Suggestion (AI Rule Builder)
+   AI: Rule Suggestion
 ---------------------------- */
 
 export function suggestRule(transactionId) {
@@ -188,13 +202,12 @@ export function suggestRule(transactionId) {
   );
 }
 
-
 /* ---------------------------
    Recurring
 ---------------------------- */
 
 export function getRecurring() {
-  return apiFetch("/api/recurring", { method: "GET", headers: {} });
+  return apiFetch("/api/recurring");
 }
 
 export function addRecurring(payload) {
@@ -218,25 +231,25 @@ export function deleteRecurring(id) {
 export function generateRecurring(month) {
   return apiFetch(`/api/recurring/generate?month=${encodeURIComponent(month)}`, {
     method: "POST",
-    headers: {}, // GET/POST without json body is fine
   });
 }
+
+/* ---------------------------
+   CSV Import
+---------------------------- */
+
 export function importCsv(rows, source = "csv") {
   return apiFetch("/api/import/csv", {
     method: "POST",
     body: JSON.stringify({ rows, source }),
   });
 }
-export async function dryRunImport({ month, rows, mapping }) {
-  const res = await fetch(`/import/csv/dry-run`, {
+
+export function dryRunImport({ month, rows, mapping }) {
+  // IMPORTANT: include /api prefix and keep everything through apiFetch
+  return apiFetch("/api/import/csv/dry-run", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
     body: JSON.stringify({ month, rows, mapping }),
   });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(t || "Dry run failed");
-  }
-  return res.json();
 }
+
