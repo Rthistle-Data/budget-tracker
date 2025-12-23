@@ -1,3 +1,4 @@
+// server/index.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -15,15 +16,19 @@ const { PrismaClient } = pkg;
 
 import { PrismaPg } from "@prisma/adapter-pg";
 
+const app = express();
+
+// --------------------
+// Prisma (Postgres) + Pool
+// --------------------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // optional but often helpful on hosted Postgres:
+  // If your hosted Postgres requires SSL, uncomment this:
   // ssl: { rejectUnauthorized: false },
 });
 
-const adapter = new PrismaPg(pool);
+const adapter = new PrismaPg({ pool });
 const prisma = new PrismaClient({ adapter });
-
 
 // --------------------
 // Middleware
@@ -31,6 +36,9 @@ const prisma = new PrismaClient({ adapter });
 app.use(express.json());
 
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+
+app.set("trust proxy", 1);
+
 app.use(
   cors({
     origin: CLIENT_ORIGIN,
@@ -38,12 +46,6 @@ app.use(
   })
 );
 
-// Trust proxy (Render) so secure cookies work behind HTTPS proxy
-app.set("trust proxy", 1);
-
-// --------------------
-// Sessions (memory store for now)
-// --------------------
 app.use(
   session({
     name: "sid",
@@ -61,7 +63,7 @@ app.use(
 );
 
 // --------------------
-// OpenAI
+// OpenAI (optional)
 // --------------------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -90,6 +92,7 @@ function rotateSession(req, userId) {
 function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
+
 function makeToken() {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -101,23 +104,6 @@ const forgotPasswordLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many password reset attempts. Try again later." },
 });
-
-function normalizeMerchant(s) {
-  return String(s || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-}
-
-function bestMatchCandidate(merchant) {
-  const m = normalizeMerchant(merchant);
-  if (!m) return "";
-  const parts = m
-    .split(/[^a-z0-9]+/g)
-    .filter(Boolean)
-    .filter((p) => p.length >= 4 && !/^\d+$/.test(p));
-  return parts[0] || m.slice(0, 12);
-}
 
 // --------------------
 // Health
@@ -156,7 +142,8 @@ app.post("/api/auth/register", async (req, res) => {
 
     await rotateSession(req, user.id);
     res.status(201).json({ user });
-  } catch {
+  } catch (e) {
+    // Usually unique constraint on email
     res.status(409).json({ error: "Email already in use" });
   }
 });
@@ -185,6 +172,8 @@ app.post("/api/auth/logout", async (req, res) => {
 // --------------------
 app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
+
+  // Always respond OK to avoid account enumeration
   res.json({ ok: true });
 
   if (!email.includes("@")) return;
@@ -194,7 +183,7 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
 
   const token = makeToken();
   const tokenHash = hashToken(token);
-  const expiresAt = new Date(Date.now() + 1000 * 60 * 60);
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60); // 1 hour
 
   await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
   await prisma.passwordResetToken.create({
@@ -243,15 +232,17 @@ app.post("/api/auth/reset-password", async (req, res) => {
 });
 
 // --------------------
-// AI rule suggestion endpoint stays here (optional)
-// (keep it if you want; remove if not needed)
+// AI rule suggestion endpoint (optional stub)
 // --------------------
 app.post("/api/ai/rule-suggestion", requireAuth, async (req, res) => {
   if (!process.env.OPENAI_API_KEY) {
     return res.status(501).json({ error: "OPENAI_API_KEY not set on server" });
   }
-  // your existing implementation can be pasted here
-  res.status(501).json({ error: "Not implemented yet in this clean file. Paste your handler here." });
+
+  // Example stub — replace with your real handler
+  res
+    .status(501)
+    .json({ error: "Not implemented yet in this clean file. Paste your handler here." });
 });
 
 // --------------------
@@ -265,5 +256,5 @@ const PORT = Number(process.env.PORT || 4000);
 app.listen(PORT, () => {
   console.log(`API running on http://localhost:${PORT}`);
   console.log(`CLIENT_ORIGIN: ${CLIENT_ORIGIN}`);
+  console.log(`NODE_ENV: ${process.env.NODE_ENV || "development"}`);
 });
-
