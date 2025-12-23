@@ -23,9 +23,11 @@ const app = express();
 // --------------------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // If your hosted Postgres requires SSL, uncomment this:
-  // ssl: { rejectUnauthorized: false },
+  ssl: process.env.NODE_ENV === "production"
+    ? { rejectUnauthorized: false }
+    : undefined,
 });
+
 
 const adapter = new PrismaPg({ pool });
 const prisma = new PrismaClient({ adapter });
@@ -108,6 +110,15 @@ const forgotPasswordLimiter = rateLimit({
 // --------------------
 // Health
 // --------------------
+app.get("/api/db-health", async (req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
 // --------------------
