@@ -3,9 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  // ✅ no url here in Prisma 7
+  provider = "postgresql"
 }
+
 
 model Transaction {
   id        String   @id @default(cuid())
