@@ -8,7 +8,6 @@ import Profile from "./pages/Profile";
 import Why from "./pages/Why";
 
 import RequireAuth from "./components/RequireAuth";
-import PublicOnly from "./components/PublicOnly";
 
 function AppShell({ children }) {
   return <div className="app-shell">{children}</div>;
@@ -18,28 +17,18 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Landing ALWAYS accessible */}
-        <Route path="/landing" element={<Landing />} />
+        {/* Landing is the default homepage */}
+        <Route path="/" element={<Landing />} />
 
-        {/* Root:
-            - if logged in -> /app
-            - if not logged in -> /landing
-        */}
-        <Route
-          path="/"
-          element={
-            <PublicOnly redirectTo="/app">
-              <Navigate to="/landing" replace />
-            </PublicOnly>
-          }
-        />
+        {/* Optional: keep /landing as an alias */}
+        <Route path="/landing" element={<Navigate to="/" replace />} />
 
         {/* Public */}
         <Route path="/why" element={<Why />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/reset-password" element={<ResetPassword />} />
 
-        {/* Private */}
+        {/* Private app */}
         <Route
           path="/app/*"
           element={
@@ -50,6 +39,7 @@ export default function App() {
             </RequireAuth>
           }
         />
+
         <Route
           path="/profile"
           element={
@@ -62,7 +52,7 @@ export default function App() {
         />
 
         {/* Fallback */}
-        <Route path="*" element={<Navigate to="/landing" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
   );
