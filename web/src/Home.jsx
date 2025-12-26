@@ -1,6 +1,8 @@
 import Papa from "papaparse";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import "./styles.css";
+
 
 import EditTransactionModal from "./components/EditTransactionModal";
 import InsightsPanel from "./components/InsightsPanel";

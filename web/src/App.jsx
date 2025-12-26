@@ -1,59 +1,68 @@
-import { BrowserRouter, Routes, Route, Outlet, Navigate, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
 import Home from "./Home";
+import Landing from "./pages/Landing";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import Profile from "./pages/Profile";
 import Why from "./pages/Why";
-import Landing from "./pages/Landing";
 
 import RequireAuth from "./components/RequireAuth";
+import PublicOnly from "./components/PublicOnly";
 
-function AppLayout() {
-  const { pathname } = useLocation();
-
-  // Only apply the app layout styling to "app pages"
-  const isAppRoute = pathname.startsWith("/app") || pathname.startsWith("/profile");
-
-  return (
-    <div className={isAppRoute ? "app-shell" : ""}>
-      <Outlet />
-    </div>
-  );
+function AppShell({ children }) {
+  return <div className="app-shell">{children}</div>;
 }
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route element={<AppLayout />}>
-          {/* Public */}
-          <Route path="/" element={<Landing />} />
-          <Route path="/why" element={<Why />} />
-          <Route path="/forgot-password" element={<ForgotPassword />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
+        {/* Landing ALWAYS accessible */}
+        <Route path="/landing" element={<Landing />} />
 
-          {/* Private */}
-          <Route
-            path="/app/*"
-            element={
-              <RequireAuth>
+        {/* Root:
+            - if logged in -> /app
+            - if not logged in -> /landing
+        */}
+        <Route
+          path="/"
+          element={
+            <PublicOnly redirectTo="/app">
+              <Navigate to="/landing" replace />
+            </PublicOnly>
+          }
+        />
+
+        {/* Public */}
+        <Route path="/why" element={<Why />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+
+        {/* Private */}
+        <Route
+          path="/app/*"
+          element={
+            <RequireAuth>
+              <AppShell>
                 <Home />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/profile"
-            element={
-              <RequireAuth>
+              </AppShell>
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/profile"
+          element={
+            <RequireAuth>
+              <AppShell>
                 <Profile />
-              </RequireAuth>
-            }
-          />
+              </AppShell>
+            </RequireAuth>
+          }
+        />
 
-          {/* Fallback */}
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
+        {/* Fallback */}
+        <Route path="*" element={<Navigate to="/landing" replace />} />
       </Routes>
     </BrowserRouter>
   );
