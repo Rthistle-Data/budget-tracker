@@ -1,14 +1,16 @@
 // web/src/api.js
 // Single, consistent API layer using cookie sessions.
-// Works locally (Vite proxy) AND in production (Vercel -> Render) via VITE_API_BASE.
+// Dev: you can use Vite proxy with VITE_API_URL="" (or omit it) and proxy /api -> http://localhost:4000
+// Prod: set VITE_API_URL="https://budget-tracker-u8to.onrender.com" (your backend URL)
 
-const API_BASE = import.meta.env.VITE_API_BASE || ""; 
-// Local dev: "" lets Vite proxy /api -> http://localhost:4000
-// Prod: set VITE_API_BASE = "https://budget-tracker-ntji.onrender.com"
+const rawBase = (import.meta.env.VITE_API_URL || "").trim();
+const API_BASE = rawBase ? rawBase.replace(/\/+$/, "") : ""; // "" means relative (/api/...) for Vite proxy
 
-export async function apiFetch(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
+async function apiFetch(path, options = {}) {
+  const url = `${API_BASE}${path}`;
+
+  const res = await fetch(url, {
+    credentials: "include", // REQUIRED for cookie sessions
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {}),
@@ -16,6 +18,7 @@ export async function apiFetch(path, options = {}) {
     ...options,
   });
 
+  // parse JSON if possible, otherwise surface text
   const text = await res.text();
   let data = {};
   try {
@@ -25,7 +28,11 @@ export async function apiFetch(path, options = {}) {
   }
 
   if (!res.ok) {
-    throw new Error(data?.error || data?.message || "Request failed");
+    const msg = data?.error || data?.message || `Request failed (${res.status})`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
 
   return data;
@@ -35,210 +42,194 @@ export async function apiFetch(path, options = {}) {
    Auth / Session
 ---------------------------- */
 
-export function me() {
-  return apiFetch("/api/auth/me", { method: "GET" });
-}
+export const me = () => apiFetch("/api/auth/me");
 
-
-
-export function logout() {
-  return apiFetch("/api/auth/logout", { method: "POST" });
-}
-
-export function register(email, password) {
-  return apiFetch("/api/auth/register", {
+export const login = (email, password) =>
+  apiFetch("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
-}
 
-export function login(email, password) {
-  return apiFetch("/api/auth/login", {
+export const register = (email, password) =>
+  apiFetch("/api/auth/register", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
-}
 
-export function forgotPassword(email) {
-  return apiFetch("/api/auth/forgot-password", {
+export const logout = () =>
+  apiFetch("/api/auth/logout", {
+    method: "POST",
+  });
+
+export const forgotPassword = (email) =>
+  apiFetch("/api/auth/forgot-password", {
     method: "POST",
     body: JSON.stringify({ email }),
   });
-}
 
-export function resetPassword(email, token, newPassword) {
-  return apiFetch("/api/auth/reset-password", {
+export const resetPassword = (email, token, newPassword) =>
+  apiFetch("/api/auth/reset-password", {
     method: "POST",
     body: JSON.stringify({ email, token, newPassword }),
   });
-}
 
 /* ---------------------------
    Profile
 ---------------------------- */
 
-export function changePassword(currentPassword, newPassword) {
-  return apiFetch("/api/profile/change-password", {
+export const changePassword = (currentPassword, newPassword) =>
+  apiFetch("/api/profile/change-password", {
     method: "POST",
     body: JSON.stringify({ currentPassword, newPassword }),
   });
-}
 
 /* ---------------------------
    Transactions
 ---------------------------- */
 
-export function getTransactions(month) {
-  const url = month
-    ? `/api/transactions?month=${encodeURIComponent(month)}`
-    : `/api/transactions`;
-  return apiFetch(url, { method: "GET", headers: {} });
-}
+export const getTransactions = (month) => {
+  const qs = month ? `?month=${encodeURIComponent(month)}` : "";
+  return apiFetch(`/api/transactions${qs}`);
+};
 
-export function addTransaction(txn) {
-  return apiFetch("/api/transactions", {
+export const addTransaction = (txn) =>
+  apiFetch("/api/transactions", {
     method: "POST",
     body: JSON.stringify(txn),
   });
-}
 
-export function updateTransaction(id, patch) {
-  return apiFetch(`/api/transactions/${id}`, {
+export const updateTransaction = (id, patch) =>
+  apiFetch(`/api/transactions/${encodeURIComponent(id)}`, {
     method: "PUT",
     body: JSON.stringify(patch),
   });
-}
 
-export function deleteTransaction(id) {
-  return apiFetch(`/api/transactions/${id}`, { method: "DELETE" });
-}
+export const deleteTransaction = (id) =>
+  apiFetch(`/api/transactions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 
 /* ---------------------------
    Budgets
 ---------------------------- */
 
-export function getBudgets(month) {
+export const getBudgets = (month) => {
   if (!month) throw new Error("month is required for getBudgets()");
-  return apiFetch(`/api/budgets?month=${encodeURIComponent(month)}`, {
-    method: "GET",
-    headers: {},
-  });
-}
+  return apiFetch(`/api/budgets?month=${encodeURIComponent(month)}`);
+};
 
-export function saveBudget({ month, category, amount }) {
-  return apiFetch("/api/budgets", {
+export const saveBudget = ({ month, category, amount }) =>
+  apiFetch("/api/budgets", {
     method: "POST",
     body: JSON.stringify({ month, category, amount }),
   });
-}
 
 /* ---------------------------
    Categories
 ---------------------------- */
 
-export function getCategories() {
-  return apiFetch("/api/categories", { method: "GET", headers: {} });
-}
+export const getCategories = () => apiFetch("/api/categories");
 
-export async function addCategory(name) {
-  const res = await fetch(`${API_BASE}/api/categories`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
+export const addCategory = async (name) => {
+  const clean = String(name || "").trim();
+  if (!clean) throw new Error("Category name required");
 
-  const text = await res.text();
-  let data = {};
   try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = text ? { error: text } : {};
+    return await apiFetch("/api/categories", {
+      method: "POST",
+      body: JSON.stringify({ name: clean }),
+    });
+  } catch (e) {
+    if (e?.status === 409) throw new Error("Category already exists");
+    throw e;
   }
+};
 
-  if (res.status === 409) throw new Error("Category already exists");
-  if (!res.ok) throw new Error(data?.error || "Failed to add category");
-  return data;
-}
-
-export function deleteCategory(id) {
-  return apiFetch(`/api/categories/${id}`, { method: "DELETE" });
-}
+export const deleteCategory = (id) =>
+  apiFetch(`/api/categories/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 
 /* ---------------------------
    Rules
+   NOTE: Your backend expects { match, category }
+   (not contains/categoryId/name)
 ---------------------------- */
 
-export function getRules() {
-  return apiFetch("/api/rules", { method: "GET", headers: {} });
-}
+export const getRules = () => apiFetch("/api/rules");
 
-export function addRule(contains, categoryId, name = "") {
-  return apiFetch("/api/rules", {
+export const addRule = (match, category) =>
+  apiFetch("/api/rules", {
     method: "POST",
-    body: JSON.stringify({ contains, categoryId, name }),
+    body: JSON.stringify({
+      match: String(match ?? "").trim().toLowerCase(),
+      category: String(category ?? "").trim(),
+    }),
   });
-}
 
-
-export function deleteRule(id) {
-  return apiFetch(`/api/rules/${id}`, { method: "DELETE" });
-}
+export const deleteRule = (id) =>
+  apiFetch(`/api/rules/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 
 /* ---------------------------
    AI: Rule Suggestion
 ---------------------------- */
 
-export function suggestRule(transactionId) {
-  return apiFetch(
-    `/api/ai/suggest-rule?transactionId=${encodeURIComponent(transactionId)}`
-  );
-}
+export const suggestRule = (transactionId) =>
+  apiFetch(`/api/ai/suggest-rule?transactionId=${encodeURIComponent(transactionId)}`);
 
 /* ---------------------------
    Recurring
 ---------------------------- */
 
-export function getRecurring() {
-  return apiFetch("/api/recurring", { method: "GET", headers: {} });
-}
+export const getRecurring = () => apiFetch("/api/recurring");
 
-export function addRecurring(payload) {
-  return apiFetch("/api/recurring", {
+export const addRecurring = (payload) =>
+  apiFetch("/api/recurring", {
     method: "POST",
     body: JSON.stringify(payload),
   });
-}
 
-export function toggleRecurring(id, isActive) {
-  return apiFetch(`/api/recurring/${id}`, {
+export const toggleRecurring = (id, isActive) =>
+  apiFetch(`/api/recurring/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify({ isActive }),
   });
-}
 
-export function deleteRecurring(id) {
-  return apiFetch(`/api/recurring/${id}`, { method: "DELETE" });
-}
-
-export function generateRecurring(month) {
-  return apiFetch(`/api/recurring/generate?month=${encodeURIComponent(month)}`, {
-    method: "POST",
-    headers: {},
+export const deleteRecurring = (id) =>
+  apiFetch(`/api/recurring/${encodeURIComponent(id)}`, {
+    method: "DELETE",
   });
-}
 
-export function importCsv(rows, source = "csv") {
-  return apiFetch("/api/import/csv", {
+export const generateRecurring = (month) =>
+  apiFetch(`/api/recurring/generate?month=${encodeURIComponent(month)}`, {
+    method: "POST",
+  });
+
+/* ---------------------------
+   CSV Import
+---------------------------- */
+
+export const importCsv = (rows, source = "csv") =>
+  apiFetch("/api/import/csv", {
     method: "POST",
     body: JSON.stringify({ rows, source }),
   });
-}
 
-export function dryRunImport({ month, rows, mapping }) {
-  return apiFetch("/api/import/csv/dry-run", {
+export const dryRunImport = ({ month, rows, mapping }) =>
+  apiFetch("/api/import/csv/dry-run", {
     method: "POST",
     body: JSON.stringify({ month, rows, mapping }),
   });
-}
+
+/* ---------------------------
+   Insights
+   NOTE: Your backend route is /insights (NOT /api/insights)
+---------------------------- */
+
+export const getInsights = (month) => {
+  if (!month) throw new Error("month is required for getInsights()");
+  return apiFetch(`/insights?month=${encodeURIComponent(month)}`);
+};
 
