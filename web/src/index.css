@@ -66,3 +66,133 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+html, body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+body {
+  display: flex;
+  justify-content: center; /* centers the app horizontally */
+}
+
+#root {
+  width: 100%;
+}
+
+/* This centers EVERYTHING (sidebar + main) */
+.app-shell {
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 24px;
+}
+/* =========================
+   Balanceary: subtle premium motion
+   ========================= */
+
+/* Slow glow drift (background blobs) */
+@keyframes auroraFloat {
+  0% { transform: translate3d(0,0,0) scale(1); opacity: 0.95; }
+  50% { transform: translate3d(-18px, 12px, 0) scale(1.03); opacity: 1; }
+  100% { transform: translate3d(0,0,0) scale(1); opacity: 0.95; }
+}
+@keyframes auroraFloat2 {
+  0% { transform: translate3d(0,0,0) scale(1); opacity: 0.9; }
+  50% { transform: translate3d(16px, -10px, 0) scale(1.04); opacity: 1; }
+  100% { transform: translate3d(0,0,0) scale(1); opacity: 0.9; }
+}
+@keyframes auroraFloat3 {
+  /* this one is centered with -50% translate in the element itself */
+  0% { transform: translate3d(-50%,0,0) scale(1); opacity: 0.9; }
+  50% { transform: translate3d(calc(-50% + 14px), -12px, 0) scale(1.03); opacity: 1; }
+  100% { transform: translate3d(-50%,0,0) scale(1); opacity: 0.9; }
+}
+
+.aurora-float  { animation: auroraFloat 14s ease-in-out infinite; }
+.aurora-float2 { animation: auroraFloat2 18s ease-in-out infinite; }
+.aurora-float3 { animation: auroraFloat3 22s ease-in-out infinite; }
+
+/* Gentle “breathing” vignette (barely noticeable) */
+@keyframes vignettePulse {
+  0% { opacity: 0.55; }
+  50% { opacity: 0.62; }
+  100% { opacity: 0.55; }
+}
+.vignette-pulse { animation: vignettePulse 10s ease-in-out infinite; }
+
+/* Glass shimmer on hover (use on premium cards/buttons) */
+@keyframes shimmer {
+  0% { transform: translateX(-120%) skewX(-12deg); opacity: 0; }
+  20% { opacity: 0.12; }
+  50% { opacity: 0.10; }
+  100% { transform: translateX(220%) skewX(-12deg); opacity: 0; }
+}
+.shimmer-hover {
+  position: relative;
+  overflow: hidden;
+}
+.shimmer-hover::after {
+  content: "";
+  position: absolute;
+  inset: -40%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255,255,255,0.16),
+    transparent
+  );
+  transform: translateX(-120%) skewX(-12deg);
+  opacity: 0;
+  pointer-events: none;
+}
+.shimmer-hover:hover::after {
+  animation: shimmer 1.2s ease-out;
+}
+
+/* Reduced motion accessibility */
+@media (prefers-reduced-motion: reduce) {
+  .aurora-float,
+  .aurora-float2,
+  .aurora-float3,
+  .vignette-pulse,
+  .shimmer-hover::after {
+    animation: none !important;
+  }
+}
+/* =========================
+   Fade-in / scroll reveal (no libs)
+   ========================= */
+
+@keyframes fadeUp {
+  0% { opacity: 0; transform: translate3d(0, 14px, 0); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+.reveal {
+  opacity: 0;
+  transform: translate3d(0, 14px, 0);
+  will-change: opacity, transform;
+}
+
+.reveal.is-visible {
+  animation: fadeUp 700ms ease-out forwards;
+}
+
+/* stagger helper */
+.reveal-delay-1.is-visible { animation-delay: 90ms; }
+.reveal-delay-2.is-visible { animation-delay: 180ms; }
+.reveal-delay-3.is-visible { animation-delay: 270ms; }
+.reveal-delay-4.is-visible { animation-delay: 360ms; }
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  .reveal.is-visible {
+    animation: none !important;
+  }
+}
+
