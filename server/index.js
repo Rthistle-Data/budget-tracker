@@ -3,6 +3,8 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import session from "express-session";
+import Database from "better-sqlite3";
+import SqliteStoreFactory from "better-sqlite3-session-store";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
@@ -21,8 +23,13 @@ app.set("trust proxy", 1);
 // --------------------
 const DATABASE_URL = process.env.DATABASE_URL?.trim();
 if (!DATABASE_URL) {
-  throw new Error('Missing DATABASE_URL. For SQLite, set DATABASE_URL="file:./dev.db" in server/.env');
+  throw new Error(
+    'Missing DATABASE_URL. For SQLite, set DATABASE_URL="file:./dev.db" in server/.env (or file:/var/data/budget.db on Render).'
+  );
 }
+
+const NODE_ENV = process.env.NODE_ENV || "development";
+const IS_PROD = NODE_ENV === "production";
 
 // --------------------
 // Prisma (SQLite Adapter)
@@ -31,44 +38,74 @@ const adapter = new PrismaBetterSqlite3({ url: DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
 // --------------------
-// CORS + JSON + Sessions
+// Middleware: JSON
 // --------------------
-const ALLOWED = new Set([
+app.use(express.json());
+
+// --------------------
+// CORS
+// - In production, set CLIENT_ORIGIN to your deployed frontend URL
+// - In dev, allow common localhost dev servers
+// --------------------
+const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN || "").trim(); // e.g. https://your-frontend.onrender.com
+
+const DEV_ALLOWED = new Set([
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://localhost:4173",
   "http://127.0.0.1:4173",
 ]);
 
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN?.trim();
-if (CLIENT_ORIGIN) ALLOWED.add(CLIENT_ORIGIN);
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // curl / server-to-server
+  if (!IS_PROD) return DEV_ALLOWED.has(origin) || origin === CLIENT_ORIGIN;
+  // prod: require exact match to avoid wildcard + credentials issues
+  return origin === CLIENT_ORIGIN;
+}
 
 app.use(
   cors({
     origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      if (ALLOWED.has(origin)) return cb(null, true);
+      if (isAllowedOrigin(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked: ${origin}`));
     },
     credentials: true,
   })
 );
-app.options("*", cors());
 
-app.use(express.json());
+// --------------------
+// Sessions: Persistent SQLite store (on Render disk)
+// NOTE: Use a disk path on Render like /var/data/sessions.db
+// --------------------
+const SESSION_SECRET = process.env.SESSION_SECRET || "dev_secret_change_me";
+const SESSIONS_DB_PATH = process.env.SESSIONS_DB_PATH || "/var/data/sessions.db";
+
+const SqliteStore = SqliteStoreFactory(session);
+const sessionDb = new Database(SESSIONS_DB_PATH);
+
+// (Optional but recommended) Make the sessions DB a bit safer/faster
+try {
+  sessionDb.pragma("journal_mode = WAL");
+  sessionDb.pragma("synchronous = NORMAL");
+} catch {
+  // ignore if pragma fails in certain environments
+}
 
 app.use(
   session({
-    name: "sid",
-    secret: process.env.SESSION_SECRET || "dev_secret_change_me",
+    store: new SqliteStore({ client: sessionDb }),
+    name: "budget.sid",
+    secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     rolling: true,
     proxy: true,
     cookie: {
       httpOnly: true,
-      sameSite: "lax",
-      secure: false,
+      // If your frontend is on a different domain (Render static site), you need:
+      // secure:true + sameSite:"none"
+      secure: IS_PROD,
+      sameSite: IS_PROD ? "none" : "lax",
       maxAge: 1000 * 60 * 60 * 24 * 14,
     },
   })
@@ -117,7 +154,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 // --------------------
 // Health
 // --------------------
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, env: NODE_ENV }));
 
 app.get("/api/db-health", async (_req, res) => {
   try {
@@ -223,7 +260,6 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
     console.log("===========================\n");
   } catch (err) {
     console.error("POST /api/auth/forgot-password failed:", err);
-    // already responded ok
   }
 });
 
@@ -342,7 +378,7 @@ app.delete("/api/categories/:id", requireAuth, async (req, res) => {
 });
 
 // --------------------
-// Rules (matches your api.js payload { match, category })
+// Rules
 // --------------------
 app.get("/api/rules", requireAuth, async (req, res) => {
   try {
@@ -388,14 +424,12 @@ app.delete("/api/rules/:id", requireAuth, async (req, res) => {
 });
 
 // --------------------
-// Budgets (your model has NO createdAt; ids are cuid strings)
+// Budgets
 // --------------------
 app.get("/api/budgets", requireAuth, async (req, res) => {
   try {
     const month = String(req.query.month || "").trim();
-    if (!/^\d{4}-\d{2}$/.test(month)) {
-      return res.status(400).json({ error: "month is required (YYYY-MM)" });
-    }
+    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month is required (YYYY-MM)" });
 
     const budgets = await prisma.budget.findMany({
       where: { userId: req.session.userId, month },
@@ -419,7 +453,6 @@ app.post("/api/budgets", requireAuth, async (req, res) => {
     if (!category) return res.status(400).json({ error: "category is required" });
     if (!Number.isFinite(amount)) return res.status(400).json({ error: "amount must be a number" });
 
-    // Use findFirst+update/create (works regardless of composite unique naming)
     const existing = await prisma.budget.findFirst({
       where: { userId: req.session.userId, month, category },
       select: { id: true },
@@ -442,12 +475,10 @@ app.post("/api/budgets", requireAuth, async (req, res) => {
 app.get("/api/transactions", requireAuth, async (req, res) => {
   try {
     const month = String(req.query.month || "").trim();
-    const where = { userId: req.session.userId };
+    const baseWhere = { userId: req.session.userId };
 
-    // If month provided, filter by YYYY-MM prefix on date (stored as string YYYY-MM-DD)
-    const txWhere = month && /^\d{4}-\d{2}$/.test(month)
-      ? { ...where, date: { startsWith: `${month}-` } }
-      : where;
+    const txWhere =
+      month && /^\d{4}-\d{2}$/.test(month) ? { ...baseWhere, date: { startsWith: `${month}-` } } : baseWhere;
 
     const transactions = await prisma.transaction.findMany({
       where: txWhere,
@@ -626,10 +657,9 @@ app.delete("/api/recurring/:id", requireAuth, async (req, res) => {
 
 app.post("/api/recurring/generate", requireAuth, async (req, res) => {
   try {
-    const month = String(req.query.month || "").trim(); // YYYY-MM
+    const month = String(req.query.month || "").trim();
     if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month is required (YYYY-MM)" });
 
-    const [Y, M] = month.split("-").map((x) => Number(x));
     const recurring = await prisma.recurring.findMany({
       where: { userId: req.session.userId, isActive: true },
       orderBy: { createdAt: "asc" },
@@ -640,13 +670,11 @@ app.post("/api/recurring/generate", requireAuth, async (req, res) => {
       const day = Math.min(r.dayOfMonth, 28);
       const date = `${month}-${String(day).padStart(2, "0")}`;
 
-      // Dedupe signature (same recurring + month)
       const importHash = crypto
         .createHash("sha256")
         .update(`${req.session.userId}|recurring|${r.id}|${month}`)
         .digest("hex");
 
-      // If already created for this month, skip
       const exists = await prisma.transaction.findFirst({
         where: { userId: req.session.userId, importHash },
         select: { id: true },
@@ -679,10 +707,7 @@ app.post("/api/recurring/generate", requireAuth, async (req, res) => {
 });
 
 // --------------------
-// CSV Import (basic + dry-run)
-// Your api.js expects:
-//  - POST /api/import/csv          { rows, source }
-//  - POST /api/import/csv/dry-run  { month, rows, mapping }
+// CSV Import (unchanged logic)
 // --------------------
 function toStr(v) {
   return v == null ? "" : String(v).trim();
@@ -693,24 +718,17 @@ function parseAmount(v) {
   return Number.isFinite(n) ? n : null;
 }
 function normalizeDateToYMD(v, monthHint) {
-  // Accept:
-  // - YYYY-MM-DD
-  // - YYYY/MM/DD
-  // - MM/DD/YYYY
-  // - DD/MM/YYYY (best-effort when >12)
   const s = toStr(v);
   if (!s) return "";
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replaceAll("/", "-");
 
-  // MM/DD/YYYY or DD/MM/YYYY
   const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
   if (m) {
     let a = Number(m[1]);
     let b = Number(m[2]);
     const y = Number(m[3]);
-    // If first part > 12, treat as DD/MM
     let mm = a;
     let dd = b;
     if (a > 12 && b <= 12) {
@@ -720,7 +738,6 @@ function normalizeDateToYMD(v, monthHint) {
     return `${y}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
   }
 
-  // If only day present and monthHint provided: "12" -> YYYY-MM-12
   if (/^\d{1,2}$/.test(s) && monthHint && /^\d{4}-\d{2}$/.test(monthHint)) {
     return `${monthHint}-${String(Number(s)).padStart(2, "0")}`;
   }
@@ -730,7 +747,7 @@ function normalizeDateToYMD(v, monthHint) {
 
 app.post("/api/import/csv/dry-run", requireAuth, async (req, res) => {
   try {
-    const month = String(req.body.month || "").trim(); // YYYY-MM
+    const month = String(req.body.month || "").trim();
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     const mapping = req.body.mapping || {};
 
@@ -754,7 +771,6 @@ app.post("/api/import/csv/dry-run", requireAuth, async (req, res) => {
       const merchant = toStr(descRaw) || "Unknown";
 
       const good = /^\d{4}-\d{2}-\d{2}$/.test(date) && amount != null;
-
       if (good) okCount++;
 
       preview.push({
@@ -781,8 +797,6 @@ app.post("/api/import/csv", requireAuth, async (req, res) => {
 
     if (!rows.length) return res.status(400).json({ error: "rows is required" });
 
-    // Expect rows already normalized OR raw rows with keys: date, amount, category, merchant, account, note
-    // We'll be forgiving.
     let inserted = 0;
     let skipped = 0;
 
@@ -804,7 +818,6 @@ app.post("/api/import/csv", requireAuth, async (req, res) => {
         .update(`${req.session.userId}|${source}|${date}|${amount}|${category}|${merchant}|${account}|${note}`)
         .digest("hex");
 
-      // dedupe (your schema: @@unique([userId, importHash]))
       const exists = await prisma.transaction.findFirst({
         where: { userId: req.session.userId, importHash },
         select: { id: true },
@@ -838,9 +851,118 @@ app.post("/api/import/csv", requireAuth, async (req, res) => {
 });
 
 // --------------------
-// AI: Rule suggestion (matches your api.js)
-// GET /api/ai/suggest-rule?transactionId=...
-// Returns: { match, category, confidence, reasoning }
+// Insights
+// --------------------
+app.get("/insights", async (req, res) => {
+  try {
+    if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const userId = req.session.userId;
+    const month = String(req.query.month || "").trim();
+
+    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be YYYY-MM" });
+
+    const start = `${month}-01`;
+    const endMonth = (() => {
+      const [y, m] = month.split("-").map(Number);
+      const d = new Date(Date.UTC(y, m - 1, 1));
+      d.setUTCMonth(d.getUTCMonth() + 1);
+      const yy = d.getUTCFullYear();
+      const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+      return `${yy}-${mm}`;
+    })();
+    const end = `${endMonth}-01`;
+
+    const txns = await prisma.transaction.findMany({
+      where: { userId, date: { gte: start, lt: end } },
+      select: { date: true, amount: true, category: true },
+      orderBy: { date: "asc" },
+    });
+
+    const budgets = await prisma.budget.findMany({
+      where: { userId, month },
+      select: { category: true, amount: true },
+    });
+
+    const budgetByCat = new Map();
+    for (const b of budgets) budgetByCat.set(b.category, Number(b.amount) || 0);
+
+    let income = 0;
+    let expenses = 0;
+
+    const byCategory = new Map();
+    const daily = new Map();
+
+    for (const t of txns) {
+      const amt = Number(t.amount) || 0;
+      const cat = (t.category || "Uncategorized").trim() || "Uncategorized";
+      const day = t.date;
+
+      if (!daily.has(day)) daily.set(day, { date: day, income: 0, expenses: 0 });
+
+      if (amt >= 0) {
+        income += amt;
+        daily.get(day).income += amt;
+      } else {
+        const out = Math.abs(amt);
+        expenses += out;
+        daily.get(day).expenses += out;
+        byCategory.set(cat, (byCategory.get(cat) || 0) + out);
+      }
+    }
+
+    const net = income - expenses;
+
+    const daysInMonth = (() => {
+      const [y, m] = month.split("-").map(Number);
+      return new Date(Date.UTC(y, m, 0)).getUTCDate();
+    })();
+
+    const dailySeries = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dd = String(d).padStart(2, "0");
+      const key = `${month}-${dd}`;
+      dailySeries.push(daily.get(key) || { date: key, income: 0, expenses: 0 });
+    }
+
+    const avgDailySpend = daysInMonth ? expenses / daysInMonth : 0;
+    const projectedSpend = avgDailySpend * daysInMonth;
+
+    const cats = new Set([...byCategory.keys(), ...budgetByCat.keys()]);
+    const byCategoryList = Array.from(cats).map((categoryName) => {
+      const spent = byCategory.get(categoryName) || 0;
+      const budget = budgetByCat.get(categoryName) || 0;
+      const pctUsed = budget > 0 ? (spent / budget) * 100 : null;
+      return { categoryName, spent, budget, pctUsed };
+    });
+
+    byCategoryList.sort((a, b) => b.spent - a.spent);
+
+    const overBudget = byCategoryList
+      .filter((c) => (c.budget || 0) > 0 && c.spent > c.budget)
+      .map((c) => ({
+        categoryName: c.categoryName,
+        spent: c.spent,
+        budget: c.budget,
+        overBy: c.spent - c.budget,
+      }))
+      .sort((a, b) => b.overBy - a.overBy);
+
+    res.json({
+      month,
+      totals: { income, expenses, net, avgDailySpend, projectedSpend },
+      byCategory: byCategoryList,
+      daily: dailySeries,
+      overBudget,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// --------------------
+// AI: Rule suggestion
 // --------------------
 app.get("/api/ai/suggest-rule", requireAuth, async (req, res) => {
   try {
@@ -901,7 +1023,7 @@ app.use("/api", (req, res) => {
 });
 
 // --------------------
-// Global error handler (prevents socket hangups)
+// Global error handler
 // --------------------
 app.use((err, _req, res, _next) => {
   console.error("UNHANDLED ERROR:", err);
@@ -912,7 +1034,8 @@ app.use((err, _req, res, _next) => {
 // Start
 // --------------------
 const PORT = Number(process.env.PORT || 4000);
-app.listen(PORT, () => {
-  console.log(`API running on http://localhost:${PORT}`);
-  console.log(`NODE_ENV: ${process.env.NODE_ENV || "development"}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`API running on port ${PORT}`);
+  console.log(`NODE_ENV: ${NODE_ENV}`);
+  console.log(`CLIENT_ORIGIN: ${CLIENT_ORIGIN || "(not set)"}`);
 });
