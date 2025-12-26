@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Outlet, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Outlet, Navigate, useLocation } from "react-router-dom";
 
 import Home from "./Home";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -10,8 +10,13 @@ import Landing from "./pages/Landing";
 import RequireAuth from "./components/RequireAuth";
 
 function AppLayout() {
+  const { pathname } = useLocation();
+
+  // Only apply the app layout styling to "app pages"
+  const isAppRoute = pathname.startsWith("/app") || pathname.startsWith("/profile");
+
   return (
-    <div className="app-shell">
+    <div className={isAppRoute ? "app-shell" : ""}>
       <Outlet />
     </div>
   );
