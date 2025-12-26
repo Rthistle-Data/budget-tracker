@@ -223,3 +223,27 @@ small { color: var(--muted); }
 }
 .kpiLabel { color: var(--muted); font-size: 12px; }
 .kpiValue { font-size: 22px; font-weight: 800; margin-top: 4px; }
+
+.why-page {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 32px;
+  line-height: 1.6;
+}
+
+.why-page h1 {
+  margin-bottom: 24px;
+}
+
+.why-page section {
+  margin-bottom: 32px;
+}
+
+.why-page blockquote {
+  margin: 16px 0;
+  padding-left: 16px;
+  border-left: 3px solid rgba(255,255,255,0.2);
+  opacity: 0.9;
+  font-style: italic;
+}
+

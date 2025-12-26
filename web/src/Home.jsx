@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import EditTransactionModal from "./components/EditTransactionModal";
+import InsightsPanel from "./components/InsightsPanel";
+
 import {
   me,
   logout,
@@ -586,6 +588,11 @@ export default function Home() {
           <div className="nav">
             <NavItem active={tab === "dashboard"} onClick={() => setTab("dashboard")}>
               Dashboard
+              
+              <NavItem active={tab === "insights"} onClick={() => setTab("insights")}>
+  	      Insights
+	    </NavItem>
+
             </NavItem>
             <NavItem active={tab === "transactions"} onClick={() => setTab("transactions")}>
               Transactions
@@ -602,12 +609,15 @@ export default function Home() {
             <NavItem active={tab === "recurring"} onClick={() => setTab("recurring")}>
               Recurring
             </NavItem>
+	<Link className="navItem" to="/why">
+  	  Why this app exists
+	</Link>
+
+	<Link className="navItem" to="/profile">
+ 		 Profile
+	</Link>
 
             <div style={{ height: 8 }} />
-
-            <Link className="navItem" to="/profile">
-              Profile
-            </Link>
 
             <button
               className="navItem"
@@ -665,6 +675,8 @@ export default function Home() {
                     budgetProgress={budgetProgress}
                     recurringForecast={recurringForecast}
                   />
+                  ) : tab === "insights" ? (
+  		    <InsightsPanel month={month} />
                 ) : tab === "transactions" ? (
                   <>
                     <div className="kpiGrid" style={{ marginBottom: 14 }}>
@@ -877,12 +889,14 @@ export default function Home() {
 
 function tabLabel(tab) {
   if (tab === "dashboard") return "Dashboard";
+  if (tab === "insights") return "Insights";
   if (tab === "transactions") return "Transactions";
   if (tab === "budgets") return "Budgets";
   if (tab === "categories") return "Categories";
   if (tab === "rules") return "Rules";
   return "Recurring";
 }
+
 
 function NavItem({ active, children, onClick }) {
   return (
@@ -905,6 +919,7 @@ function KPI({ label, value }) {
     </div>
   );
 }
+
 
 /* ---------------------------
    AI Modal
