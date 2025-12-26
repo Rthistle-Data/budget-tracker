@@ -8,7 +8,6 @@ import Why from "./pages/Why";
 import Landing from "./pages/Landing";
 
 import RequireAuth from "./components/RequireAuth";
-import PublicOnly from "./components/PublicOnly";
 
 function AppLayout() {
   return (
@@ -23,17 +22,8 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route element={<AppLayout />}>
-          {/* Public (but redirect to /app if already logged in) */}
-          <Route
-            path="/"
-            element={
-              <PublicOnly redirectTo="/app">
-                <Landing />
-              </PublicOnly>
-            }
-          />
-
           {/* Public */}
+          <Route path="/" element={<Landing />} />
           <Route path="/why" element={<Why />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
