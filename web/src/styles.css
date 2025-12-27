@@ -246,4 +246,19 @@ small { color: var(--muted); }
   opacity: 0.9;
   font-style: italic;
 }
+/* Paywall modal */
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  z-index: 9999;
+}
+
+.modal {
+  width: min(720px, 100%);
+  border-radius: 18px;
+}
 

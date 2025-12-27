@@ -1,9 +1,11 @@
+// web/src/Home.jsx
 import Papa from "papaparse";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import "./styles.css";
 
-
+import PaywallModal from "./components/PaywallModal";
+import Dashboard from "./pages/Dashboard";
 import EditTransactionModal from "./components/EditTransactionModal";
 import InsightsPanel from "./components/InsightsPanel";
 
@@ -54,10 +56,6 @@ import {
 ---------------------------- */
 
 function toArray(value, key) {
-  // Supports:
-  // - direct array
-  // - { [key]: array }
-  // - null/undefined
   if (Array.isArray(value)) return value;
   if (value && key && Array.isArray(value[key])) return value[key];
   return [];
@@ -92,7 +90,6 @@ function CsvImportCard({ month, onImported }) {
     const str = String(s).trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
 
-    // MM/DD/YYYY or M/D/YY etc
     const m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
     if (m) {
       const mm = m[1].padStart(2, "0");
@@ -153,14 +150,11 @@ function CsvImportCard({ month, onImported }) {
         return { date, merchant, amount, account, note: "" };
       });
 
-      // Prefer rows in selected month if present
       const filtered = rows.filter((r) => r.date && r.date.startsWith(month));
       const toSend = filtered.length ? filtered : rows;
 
-      // Your server route expects: { rows, source }
       const result = await importCsv(toSend, file.name);
 
-      // Your server returns: { ok, inserted, skipped }
       const inserted = Number(result?.inserted) || 0;
       const skipped = Number(result?.skipped) || 0;
 
@@ -201,7 +195,12 @@ function CsvImportCard({ month, onImported }) {
       </div>
 
       {msg && (
-        <div style={{ marginTop: 10, color: msg.startsWith("Imported:") ? "var(--muted)" : "var(--danger)" }}>
+        <div
+          style={{
+            marginTop: 10,
+            color: msg.startsWith("Imported:") ? "var(--muted)" : "var(--danger)",
+          }}
+        >
           {msg}
         </div>
       )}
@@ -225,10 +224,34 @@ export default function Home() {
   const [authChecked, setAuthChecked] = useState(false);
 
   // --------------------
-  // UI state
+  // Tabs
   // --------------------
-  const [tab, setTab] = useState("dashboard");
+  const [topTab, setTopTab] = useState("dashboard"); // dashboard | tracker
+  const [trackerTab, setTrackerTab] = useState("transactions"); // insights | transactions | budgets | categories | rules | recurring
+
+  // --------------------
+  // Month
+  // --------------------
   const [month, setMonth] = useState(monthNow());
+
+  // --------------------
+  // Paywall modal
+  // --------------------
+  const [paywallOpen, setPaywallOpen] = useState(false);
+  const isPro = user?.plan === "pro";
+
+  function openPaywall() {
+    setPaywallOpen(true);
+  }
+  function closePaywall() {
+    setPaywallOpen(false);
+  }
+
+  // TEMP: fake upgrade for testing (remove later when Stripe is hooked up)
+  function fakeUpgradeToPro() {
+    setUser((u) => ({ ...(u || {}), plan: "pro" }));
+    setPaywallOpen(false);
+  }
 
   // --------------------
   // Data state
@@ -289,9 +312,9 @@ export default function Home() {
 
   async function confirmAiRule() {
     if (!aiSuggestion) return;
+
     await addRuleApi(aiSuggestion.match, aiSuggestion.category);
 
-    // rule list can be either array or {rules:[]}
     const r = await getRules();
     setRules(toArray(r, "rules"));
 
@@ -361,8 +384,14 @@ export default function Home() {
   // Derived data
   // --------------------
   const summary = useMemo(() => {
-    const income = safeTxns.filter((x) => Number(x.amount) > 0).reduce((a, b) => a + (Number(b.amount) || 0), 0);
-    const spend = safeTxns.filter((x) => Number(x.amount) < 0).reduce((a, b) => a + (Number(b.amount) || 0), 0);
+    const income = safeTxns
+      .filter((x) => Number(x.amount) > 0)
+      .reduce((a, b) => a + (Number(b.amount) || 0), 0);
+
+    const spend = safeTxns
+      .filter((x) => Number(x.amount) < 0)
+      .reduce((a, b) => a + (Number(b.amount) || 0), 0);
+
     return { income, spend, net: income + spend };
   }, [safeTxns]);
 
@@ -401,64 +430,10 @@ export default function Home() {
     });
   }, [categories, budgetMap, spentByCategory]);
 
-  const topCategories = useMemo(() => {
-    const arr = Array.from(spentByCategory.entries()).map(([cat, spent]) => ({
-      cat,
-      spent: Number(spent) || 0,
-    }));
-    arr.sort((a, b) => b.spent - a.spent);
-    return arr.slice(0, 6);
-  }, [spentByCategory]);
-
-  const budgetProgress = useMemo(() => {
-    const rows = budgetRows
-      .filter((r) => (Number(r.budgeted) || 0) > 0 || (Number(r.spent) || 0) > 0)
-      .map((r) => ({
-        ...r,
-        budgeted: Number(r.budgeted) || 0,
-        spent: Number(r.spent) || 0,
-      }));
-
-    rows.sort((a, b) => (b.budgeted > 0) - (a.budgeted > 0) || b.spent - a.spent);
-    return rows.slice(0, 10);
-  }, [budgetRows]);
-
-  // ✅ Exact matching using recurringId
-  const recurringForecast = useMemo(() => {
-    const active = safeRecurring.filter((x) => x.isActive !== 0 && x.isActive !== false);
-
-    function isApplied(recItem) {
-      return safeTxns.some((t) => t.recurringId === recItem.id);
-    }
-
-    const rows = active
-      .map((x) => {
-        const dueDate = isoDateForMonthDay(month, x.dayOfMonth);
-        const applied = isApplied(x);
-        return {
-          id: x.id,
-          name: x.name,
-          amount: Number(x.amount) || 0,
-          category: x.category,
-          merchant: x.merchant,
-          dayOfMonth: x.dayOfMonth,
-          dueDate,
-          applied,
-        };
-      })
-      .sort((a, b) => a.dayOfMonth - b.dayOfMonth);
-
-    const upcoming = rows.filter((x) => !x.applied);
-
-    const upcomingExpenseTotal = upcoming
-      .filter((x) => x.amount < 0)
-      .reduce((sum, x) => sum + Math.abs(x.amount), 0);
-
-    const upcomingIncomeTotal = upcoming
-      .filter((x) => x.amount > 0)
-      .reduce((sum, x) => sum + x.amount, 0);
-
-    return { rows, upcoming, upcomingExpenseTotal, upcomingIncomeTotal };
+  // ✅ Exact matching using recurringId (kept)
+  useMemo(() => {
+    // you can keep this if you use it later for dashboard widgets
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [safeRecurring, safeTxns, month]);
 
   // --------------------
@@ -505,8 +480,6 @@ export default function Home() {
     };
 
     const updated = await updateTransaction(editTx.id, patch);
-
-    // Some APIs return { transaction }, others return transaction directly
     const updatedTx = updated?.transaction ?? updated;
 
     setTxns((prev) => {
@@ -579,45 +552,94 @@ export default function Home() {
         {/* Sidebar */}
         <aside className="card">
           <div className="topbar">
-            <div>
-              <div className="brandTitle">Budget Tracker</div>
-              <div className="brandSub">
-                Signed in as <b>{user.email}</b>
+            <div style={{ width: "100%" }}>
+              <div className="row" style={{ alignItems: "center" }}>
+                <div>
+                  <div className="brandTitle">Budget Tracker</div>
+                  <div className="brandSub">
+                    Signed in as <b>{user.email}</b>
+                  </div>
+                </div>
+
+                <div className="spacer" />
+
+                {/* Pro badge */}
+                <span
+                  className="chip"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "6px 10px",
+                    borderRadius: 999,
+                    fontWeight: 800,
+                    fontSize: 12,
+                    background: isPro ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.06)",
+                  }}
+                  title={isPro ? "You’re on Pro" : "Free plan"}
+                >
+                  {isPro ? "⭐ PRO" : "FREE"}
+                </span>
               </div>
+
+              {/* Upgrade CTA */}
+              {!isPro && (
+                <button
+                  className="btn btnPrimary"
+                  style={{ width: "100%", marginTop: 12 }}
+                  type="button"
+                  onClick={openPaywall}
+                >
+                  Upgrade to Pro
+                </button>
+              )}
             </div>
           </div>
 
+          {/* Nav */}
           <div className="nav">
-            <NavItem active={tab === "dashboard"} onClick={() => setTab("dashboard")}>
+            <NavItem active={topTab === "dashboard"} onClick={() => setTopTab("dashboard")}>
               Dashboard
-              
-              <NavItem active={tab === "insights"} onClick={() => setTab("insights")}>
-  	      Insights
-	    </NavItem>
+            </NavItem>
 
+            <NavItem active={topTab === "tracker"} onClick={() => setTopTab("tracker")}>
+              Budget Tracker
             </NavItem>
-            <NavItem active={tab === "transactions"} onClick={() => setTab("transactions")}>
-              Transactions
-            </NavItem>
-            <NavItem active={tab === "budgets"} onClick={() => setTab("budgets")}>
-              Budgets
-            </NavItem>
-            <NavItem active={tab === "categories"} onClick={() => setTab("categories")}>
-              Categories
-            </NavItem>
-            <NavItem active={tab === "rules"} onClick={() => setTab("rules")}>
-              Rules
-            </NavItem>
-            <NavItem active={tab === "recurring"} onClick={() => setTab("recurring")}>
-              Recurring
-            </NavItem>
-	<Link className="navItem" to="/why">
-  	  Why this app exists
-	</Link>
 
-	<Link className="navItem" to="/profile">
- 		 Profile
-	</Link>
+            {topTab === "tracker" && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ height: 8 }} />
+
+                <NavItem active={trackerTab === "insights"} onClick={() => setTrackerTab("insights")}>
+                  Insights
+                </NavItem>
+                <NavItem active={trackerTab === "transactions"} onClick={() => setTrackerTab("transactions")}>
+                  Transactions
+                </NavItem>
+                <NavItem active={trackerTab === "budgets"} onClick={() => setTrackerTab("budgets")}>
+                  Budgets
+                </NavItem>
+                <NavItem active={trackerTab === "categories"} onClick={() => setTrackerTab("categories")}>
+                  Categories
+                </NavItem>
+                <NavItem active={trackerTab === "rules"} onClick={() => setTrackerTab("rules")}>
+                  Rules
+                </NavItem>
+                <NavItem active={trackerTab === "recurring"} onClick={() => setTrackerTab("recurring")}>
+                  Recurring
+                </NavItem>
+              </div>
+            )}
+
+            <div style={{ height: 8 }} />
+
+            <Link className="navItem" to="/why">
+              Why this app exists
+            </Link>
+
+            <Link className="navItem" to="/profile">
+              Profile
+            </Link>
 
             <div style={{ height: 8 }} />
 
@@ -639,22 +661,29 @@ export default function Home() {
         <main className="card">
           <div className="topbar">
             <div>
-              <div style={{ fontSize: 18, fontWeight: 800 }}>{tabLabel(tab)}</div>
-              <div className="brandSub">Month view + categorized spending</div>
+              <div style={{ fontSize: 18, fontWeight: 800 }}>
+                {topTab === "dashboard" ? "Dashboard" : tabLabel(trackerTab)}
+              </div>
+              <div className="brandSub">
+                {topTab === "dashboard" ? "Premium overview + Pro features" : "Month view + categorized spending"}
+              </div>
             </div>
 
             <div className="spacer" />
 
-            <div className="row">
-              <label className="field" style={{ width: 160 }}>
-                <div className="label">Month</div>
-                <input className="input" value={month} onChange={(e) => setMonth(e.target.value)} />
-              </label>
+            {/* Month controls: tracker only */}
+            {topTab === "tracker" && (
+              <div className="row">
+                <label className="field" style={{ width: 160 }}>
+                  <div className="label">Month</div>
+                  <input className="input" value={month} onChange={(e) => setMonth(e.target.value)} />
+                </label>
 
-              <button className="btn" onClick={loadAll} type="button">
-                Refresh
-              </button>
-            </div>
+                <button className="btn" onClick={loadAll} type="button">
+                  Refresh
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="cardPad">
@@ -667,19 +696,11 @@ export default function Home() {
 
             {!loading && (
               <>
-                {tab === "dashboard" ? (
-                  <DashboardPanel
-                    month={month}
-                    income={summary.income}
-                    spend={Math.abs(summary.spend)}
-                    net={summary.net}
-                    topCategories={topCategories}
-                    budgetProgress={budgetProgress}
-                    recurringForecast={recurringForecast}
-                  />
-                  ) : tab === "insights" ? (
-  		    <InsightsPanel month={month} />
-                ) : tab === "transactions" ? (
+                {topTab === "dashboard" ? (
+                  <Dashboard user={user} budgets={safeBudgets} transactions={safeTxns} onOpenPaywall={openPaywall} />
+                ) : trackerTab === "insights" ? (
+                  <InsightsPanel month={month} summary={summary} transactions={safeTxns} budgets={safeBudgets} />
+                ) : trackerTab === "transactions" ? (
                   <>
                     <div className="kpiGrid" style={{ marginBottom: 14 }}>
                       <KPI label={`Income · ${month}`} value={`$${money(summary.income)}`} />
@@ -818,9 +839,9 @@ export default function Home() {
                       onConfirm={confirmAiRule}
                     />
                   </>
-                ) : tab === "budgets" ? (
+                ) : trackerTab === "budgets" ? (
                   <BudgetsPanel month={month} rows={budgetRows} onSave={onSaveBudget} />
-                ) : tab === "categories" ? (
+                ) : trackerTab === "categories" ? (
                   <CategoriesPanel
                     items={safeCategoriesList}
                     onAdd={async (name) => {
@@ -834,7 +855,7 @@ export default function Home() {
                       setCategoriesList(toArray(c, "categories"));
                     }}
                   />
-                ) : tab === "rules" ? (
+                ) : trackerTab === "rules" ? (
                   <RulesPanel
                     rules={safeRules}
                     categories={categories}
@@ -881,6 +902,9 @@ export default function Home() {
           </div>
         </main>
       </div>
+
+      {/* Paywall modal rendered once at root */}
+      <PaywallModal open={paywallOpen} onClose={closePaywall} onUpgrade={fakeUpgradeToPro} />
     </div>
   );
 }
@@ -890,7 +914,6 @@ export default function Home() {
 ---------------------------- */
 
 function tabLabel(tab) {
-  if (tab === "dashboard") return "Dashboard";
   if (tab === "insights") return "Insights";
   if (tab === "transactions") return "Transactions";
   if (tab === "budgets") return "Budgets";
@@ -898,7 +921,6 @@ function tabLabel(tab) {
   if (tab === "rules") return "Rules";
   return "Recurring";
 }
-
 
 function NavItem({ active, children, onClick }) {
   return (
@@ -921,7 +943,6 @@ function KPI({ label, value }) {
     </div>
   );
 }
-
 
 /* ---------------------------
    AI Modal
@@ -982,181 +1003,6 @@ function AiRuleModal({ open, loading, error, suggestion, tx, onClose, onConfirm 
    Panels (same as yours)
 ---------------------------- */
 
-function DashboardPanel({ month, income, spend, net, topCategories, budgetProgress, recurringForecast }) {
-  const big = (n) => {
-    const x = Number(n) || 0;
-    const s = Math.abs(x).toFixed(2);
-    return x < 0 ? `-$${s}` : `$${s}`;
-  };
-
-  return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <div className="kpiGrid">
-        <KPI label={`Income · ${month}`} value={big(income)} />
-        <KPI label={`Spend · ${month}`} value={big(spend)} />
-        <KPI label={`Net · ${month}`} value={big(net)} />
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-        <div className="card cardPad" style={{ borderRadius: 16 }}>
-          <div className="brandTitle" style={{ fontSize: 16 }}>Forecast (Recurring)</div>
-          <div className="brandSub">What’s still coming in {month}</div>
-
-          {(() => {
-            const upcoming = recurringForecast?.upcoming || [];
-            const upcomingExpenseTotal = Number(recurringForecast?.upcomingExpenseTotal) || 0;
-            const upcomingIncomeTotal = Number(recurringForecast?.upcomingIncomeTotal) || 0;
-
-            const forecastSpend = (Number(spend) || 0) + upcomingExpenseTotal;
-            const forecastNet = (Number(net) || 0) + upcomingIncomeTotal - upcomingExpenseTotal;
-
-            return (
-              <>
-                <div className="kpiGrid" style={{ marginTop: 12 }}>
-                  <KPI label="Upcoming income" value={`$${money(upcomingIncomeTotal)}`} />
-                  <KPI label="Upcoming expenses" value={`$${money(upcomingExpenseTotal)}`} />
-                  <KPI label="Forecast net" value={`$${money(forecastNet)}`} />
-                </div>
-
-                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-                  {upcoming.length === 0 ? (
-                    <div className="brandSub">Nothing upcoming — looks like you’re caught up.</div>
-                  ) : (
-                    upcoming.slice(0, 6).map((x) => (
-                      <div
-                        key={x.id}
-                        style={{
-                          display: "flex",
-                          gap: 10,
-                          alignItems: "center",
-                          padding: "10px 12px",
-                          borderRadius: 14,
-                          background: "rgba(255,255,255,0.04)",
-                          border: "1px solid rgba(255,255,255,0.08)",
-                        }}
-                      >
-                        <div style={{ fontWeight: 800 }}>
-                          {x.name}
-                          <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 500 }}>
-                            Due {x.dueDate}{x.category ? ` · ${x.category}` : ""}
-                          </div>
-                        </div>
-
-                        <div style={{ marginLeft: "auto", fontWeight: 800 }}>
-                          {x.amount < 0 ? `-$${money(Math.abs(x.amount))}` : `$${money(x.amount)}`}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13 }}>
-                  Forecast spend: <b>${money(forecastSpend)}</b>
-                </div>
-              </>
-            );
-          })()}
-        </div>
-
-        <div className="card cardPad" style={{ borderRadius: 16 }}>
-          <div className="brandTitle" style={{ fontSize: 16 }}>Top spending categories</div>
-          <div className="brandSub">Highest spending in {month}</div>
-
-          <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-            {topCategories.length === 0 ? (
-              <div className="brandSub">No spending yet this month.</div>
-            ) : (
-              topCategories.map((x) => (
-                <div key={x.cat} style={{ display: "grid", gap: 6 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div style={{ fontWeight: 800 }}>{x.cat}</div>
-                    <div style={{ marginLeft: "auto", color: "var(--muted)" }}>{big(x.spent)}</div>
-                  </div>
-
-                  <div
-                    style={{
-                      height: 10,
-                      borderRadius: 999,
-                      background: "rgba(255,255,255,0.08)",
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        height: "100%",
-                        width: `${Math.min(100, Math.round((x.spent / (topCategories[0]?.spent || 1)) * 100))}%`,
-                        background: "rgba(91,140,255,0.55)",
-                        transition: "width 180ms ease",
-                      }}
-                    />
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div className="card cardPad" style={{ borderRadius: 16, gridColumn: "1 / -1" }}>
-          <div className="brandTitle" style={{ fontSize: 16 }}>Budget progress</div>
-          <div className="brandSub">Spent vs Budgeted (top 10)</div>
-
-          <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-            {budgetProgress.length === 0 ? (
-              <div className="brandSub">No budgets or spending yet.</div>
-            ) : (
-              budgetProgress.slice(0, 10).map((r) => {
-                const spent = Number(r.spent) || 0;
-                const budgeted = Number(r.budgeted) || 0;
-
-                const hasBudget = budgeted > 0;
-                const pctRaw = hasBudget ? (spent / budgeted) * 100 : 0;
-                const fill = hasBudget ? Math.min(120, Math.max(0, pctRaw)) : 0;
-
-                const remaining = budgeted - spent;
-
-                return (
-                  <div key={r.cat} style={{ display: "grid", gap: 6 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <div style={{ fontWeight: 800 }}>{r.cat}</div>
-                      <div style={{ marginLeft: "auto", color: "var(--muted)" }}>
-                        {hasBudget
-                          ? `${big(spent)} / ${big(budgeted)} · ${pctRaw.toFixed(0)}% · ${
-                              remaining >= 0 ? `${big(remaining)} left` : `${big(-remaining)} over`
-                            }`
-                          : `${big(spent)} spent (no budget)`}
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        height: 10,
-                        borderRadius: 999,
-                        background: "rgba(255,255,255,0.08)",
-                        border: "1px solid rgba(255,255,255,0.10)",
-                        overflow: "hidden",
-                      }}
-                    >
-                      <div
-                        style={{
-                          height: "100%",
-                          width: `${fill}%`,
-                          background: "rgba(255,255,255,0.18)",
-                          transition: "width 180ms ease",
-                        }}
-                      />
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function BudgetsPanel({ month, rows, onSave }) {
   return (
     <div className="card cardPad" style={{ borderRadius: 16 }}>
@@ -1208,7 +1054,9 @@ function BudgetRow({ row, onSave }) {
       <td style={{ fontWeight: 800 }}>{cat}</td>
       <td><input className="input" value={val} onChange={(e) => setVal(e.target.value)} /></td>
       <td>${money(spent)}</td>
-      <td style={{ fontWeight: 800, color: overspent ? "var(--danger)" : "var(--text)" }}>${money(remaining)}</td>
+      <td style={{ fontWeight: 800, color: overspent ? "var(--danger)" : "var(--text)" }}>
+        ${money(remaining)}
+      </td>
       <td>
         <button className="btn btnPrimary" onClick={save} disabled={saving} type="button">
           {saving ? "Saving…" : "Save"}
@@ -1243,7 +1091,12 @@ function CategoriesPanel({ items, onAdd, onDelete }) {
       <div className="brandSub">Keep your budget tidy with clear buckets.</div>
 
       <form onSubmit={submit} className="row" style={{ marginTop: 12 }}>
-        <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Add a category…" />
+        <input
+          className="input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Add a category…"
+        />
         <button className="btn btnPrimary" disabled={busy} type="submit">
           {busy ? "Adding…" : "Add"}
         </button>
@@ -1254,13 +1107,17 @@ function CategoriesPanel({ items, onAdd, onDelete }) {
           <div className="brandSub">No categories yet.</div>
         ) : (
           <table className="table">
-            <thead><tr><th>Name</th><th style={{ width: 140 }} /></tr></thead>
+            <thead>
+              <tr><th>Name</th><th style={{ width: 140 }} /></tr>
+            </thead>
             <tbody>
               {items.map((c) => (
                 <tr key={c.id}>
                   <td style={{ fontWeight: 800 }}>{c.name}</td>
                   <td>
-                    <button className="btn btnDanger" onClick={() => onDelete(c.id)} type="button">Delete</button>
+                    <button className="btn btnDanger" onClick={() => onDelete(c.id)} type="button">
+                      Delete
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -1306,9 +1163,21 @@ function RulesPanel({ rules, categories, onAdd, onDelete }) {
       <div className="brandSub">Auto-assign categories based on merchant text.</div>
 
       <form onSubmit={submit} className="row" style={{ marginTop: 12 }}>
-        <input className="input" value={match} onChange={(e) => setMatch(e.target.value)} placeholder='Match text (e.g. "amazon")' />
-        <select className="select" value={category} onChange={(e) => setCategory(e.target.value)} style={{ width: 220 }}>
-          {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+        <input
+          className="input"
+          value={match}
+          onChange={(e) => setMatch(e.target.value)}
+          placeholder='Match text (e.g. "amazon")'
+        />
+        <select
+          className="select"
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          style={{ width: 220 }}
+        >
+          {categories.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
         </select>
         <button className="btn btnPrimary" disabled={busy} type="submit">
           {busy ? "Adding…" : "Add rule"}
@@ -1320,14 +1189,18 @@ function RulesPanel({ rules, categories, onAdd, onDelete }) {
           <div className="brandSub">No rules yet.</div>
         ) : (
           <table className="table">
-            <thead><tr><th>Match</th><th>Category</th><th style={{ width: 140 }} /></tr></thead>
+            <thead>
+              <tr><th>Match</th><th>Category</th><th style={{ width: 140 }} /></tr>
+            </thead>
             <tbody>
               {rules.map((r) => (
                 <tr key={r.id}>
                   <td style={{ fontWeight: 800 }}>{r.match}</td>
                   <td>{r.category}</td>
                   <td>
-                    <button className="btn btnDanger" onClick={() => onDelete(r.id)} type="button">Delete</button>
+                    <button className="btn btnDanger" onClick={() => onDelete(r.id)} type="button">
+                      Delete
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -1383,22 +1256,44 @@ function RecurringPanel({ month, categories, items, onAdd, onToggle, onDelete, o
           <div className="brandSub">Subscriptions, rent, bills. Generate creates missing items.</div>
         </div>
         <div className="spacer" />
-        <button className="btn btnPrimary" onClick={onGenerate} type="button">Generate for {month}</button>
+        <button className="btn btnPrimary" onClick={onGenerate} type="button">
+          Generate for {month}
+        </button>
       </div>
 
       <form onSubmit={submit} className="grid3" style={{ marginTop: 12 }}>
-        <div className="field"><div className="label">Name</div><input className="input" value={name} onChange={(e) => setName(e.target.value)} /></div>
-        <div className="field"><div className="label">Amount</div><input className="input" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="-1200" /></div>
-        <div className="field"><div className="label">Day (1–28)</div><input className="input" value={dayOfMonth} onChange={(e) => setDayOfMonth(e.target.value)} /></div>
+        <div className="field">
+          <div className="label">Name</div>
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="field">
+          <div className="label">Amount</div>
+          <input className="input" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="-1200" />
+        </div>
+        <div className="field">
+          <div className="label">Day (1–28)</div>
+          <input className="input" value={dayOfMonth} onChange={(e) => setDayOfMonth(e.target.value)} />
+        </div>
 
-        <div className="field"><div className="label">Category</div>
+        <div className="field">
+          <div className="label">Category</div>
           <select className="select" value={category} onChange={(e) => setCategory(e.target.value)}>
             {categories.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
-        <div className="field"><div className="label">Merchant</div><input className="input" value={merchant} onChange={(e) => setMerchant(e.target.value)} /></div>
-        <div className="field"><div className="label">Account</div><input className="input" value={account} onChange={(e) => setAccount(e.target.value)} /></div>
-        <div className="field" style={{ gridColumn: "1 / -1" }}><div className="label">Note</div><input className="input" value={note} onChange={(e) => setNote(e.target.value)} /></div>
+        <div className="field">
+          <div className="label">Merchant</div>
+          <input className="input" value={merchant} onChange={(e) => setMerchant(e.target.value)} />
+        </div>
+        <div className="field">
+          <div className="label">Account</div>
+          <input className="input" value={account} onChange={(e) => setAccount(e.target.value)} />
+        </div>
+
+        <div className="field" style={{ gridColumn: "1 / -1" }}>
+          <div className="label">Note</div>
+          <input className="input" value={note} onChange={(e) => setNote(e.target.value)} />
+        </div>
 
         <button className="btn btnPrimary" disabled={busy} style={{ gridColumn: "1 / -1" }} type="submit">
           {busy ? "Adding…" : "Add recurring item"}
@@ -1425,10 +1320,16 @@ function RecurringPanel({ month, categories, items, onAdd, onToggle, onDelete, o
                   <td>{it.merchant}</td>
                   <td>{it.account}</td>
                   <td>
-                    <input type="checkbox" checked={!!it.isActive} onChange={(e) => onToggle(it.id, e.target.checked)} />
+                    <input
+                      type="checkbox"
+                      checked={!!it.isActive}
+                      onChange={(e) => onToggle(it.id, e.target.checked)}
+                    />
                   </td>
                   <td>
-                    <button className="btn btnDanger" onClick={() => onDelete(it.id)} type="button">Delete</button>
+                    <button className="btn btnDanger" onClick={() => onDelete(it.id)} type="button">
+                      Delete
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -1465,10 +1366,18 @@ function AuthScreen({ onAuthed }) {
   return (
     <div>
       <div className="row" style={{ marginBottom: 12 }}>
-        <button className={`btn ${mode === "login" ? "btnPrimary" : ""}`} onClick={() => setMode("login")} type="button">
+        <button
+          className={`btn ${mode === "login" ? "btnPrimary" : ""}`}
+          onClick={() => setMode("login")}
+          type="button"
+        >
           Login
         </button>
-        <button className={`btn ${mode === "register" ? "btnPrimary" : ""}`} onClick={() => setMode("register")} type="button">
+        <button
+          className={`btn ${mode === "register" ? "btnPrimary" : ""}`}
+          onClick={() => setMode("register")}
+          type="button"
+        >
           Register
         </button>
       </div>
@@ -1499,4 +1408,3 @@ function AuthScreen({ onAuthed }) {
     </div>
   );
 }
-

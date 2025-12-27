@@ -233,3 +233,10 @@ export const getInsights = (month) => {
   return apiFetch(`/insights?month=${encodeURIComponent(month)}`);
 };
 
+export async function getForecast(days = 30) {
+  const res = await fetch(`/api/forecast?days=${days}`, {
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}

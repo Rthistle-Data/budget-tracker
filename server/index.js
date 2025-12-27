@@ -9,6 +9,14 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import OpenAI from "openai";
+import {
+  toISODate,
+  addDays,
+  expandRecurring,
+  buildTimeline,
+  summarize,
+} from "./forecast.js";
+
 
 import prismaPkg from "@prisma/client";
 const { PrismaClient } = prismaPkg;
@@ -960,7 +968,95 @@ app.get("/insights", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+app.get("/api/forecast", async (req, res) => {
+  try {
+    // If you enforce auth elsewhere, keep consistent with your app.
+    // Example:
+    if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
 
+    const userId = req.session.userId;
+
+    const days = Math.max(7, Math.min(90, Number(req.query.days || 30))); // clamp 7..90
+    const startISO = toISODate(new Date());
+    const endISO = toISODate(addDays(new Date(), days - 1));
+
+    // 1) Opening balance (simple + reliable):
+    // Sum all transactions up to today. If you have a "startingBalance" concept, add it here.
+    const agg = await prisma.transaction.aggregate({
+      where: {
+        userId,
+        date: { lte: startISO },
+      },
+      _sum: { amount: true },
+    });
+
+    const openingBalance = Number(agg?._sum?.amount || 0);
+
+    // 2) Future one-off transactions already entered (optional but very useful)
+    const futureTx = await prisma.transaction.findMany({
+      where: {
+        userId,
+        date: { gte: startISO, lte: endISO },
+      },
+      select: {
+        id: true,
+        date: true,
+        description: true,
+        amount: true,
+      },
+      orderBy: [{ date: "asc" }],
+    });
+
+    const txEvents = futureTx.map((t) => ({
+      kind: "transaction",
+      transactionId: t.id,
+      date: t.date,
+      amount: Number(t.amount) || 0,
+      description: t.description || "Transaction",
+    }));
+
+    // 3) Recurring events
+    const recurring = await prisma.recurring.findMany({
+      where: { userId, active: true },
+      select: {
+        id: true,
+        description: true,
+        amount: true,
+        cadence: true,
+        nextDate: true,
+        active: true,
+      },
+    });
+
+    const recurringEvents = expandRecurring(recurring, startISO, endISO);
+
+    // 4) Build timeline
+    const allEvents = [...txEvents, ...recurringEvents];
+
+    const { timeline, lowestBalance, lowestDate } = buildTimeline({
+      startISO,
+      days,
+      openingBalance,
+      events: allEvents,
+    });
+
+    const sum = summarize({ startISO, timeline });
+
+    return res.json({
+      start: startISO,
+      end: endISO,
+      days,
+      openingBalance,
+      lowestBalance,
+      lowestDate,
+      summary: sum,
+      timeline,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Forecast failed" });
+  }
+});
 // --------------------
 // AI: Rule suggestion
 // --------------------

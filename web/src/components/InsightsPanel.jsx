@@ -1,3 +1,4 @@
+// web/src/components/InsightsPanel.jsx
 import { useEffect, useMemo, useState } from "react";
 import {
   ResponsiveContainer,
@@ -34,7 +35,13 @@ function statusFor(pctUsed) {
   return { label: "Over", tone: "bad" };
 }
 
-export default function InsightsPanel({ month }) {
+export default function InsightsPanel({ month, summary, transactions = [], budgets = [] }) {
+  // Safe fallbacks so this never crashes
+  const safeSummary = summary || { income: 0, spend: 0, net: 0 };
+  const incomeFallback = Number(safeSummary.income || 0);
+  const spendFallback = Math.abs(Number(safeSummary.spend || 0));
+  const netFallback = Number(safeSummary.net || 0);
+
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -43,10 +50,21 @@ export default function InsightsPanel({ month }) {
     let alive = true;
     setBusy(true);
     setErr("");
+
     getInsights(month)
-      .then((d) => alive && setData(d))
-      .catch((e) => alive && setErr(e.message || "Failed to load"))
-      .finally(() => alive && setBusy(false));
+      .then((d) => {
+        if (!alive) return;
+        setData(d);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setErr(e?.message || "Failed to load insights");
+      })
+      .finally(() => {
+        if (!alive) return;
+        setBusy(false);
+      });
+
     return () => {
       alive = false;
     };
@@ -63,17 +81,27 @@ export default function InsightsPanel({ month }) {
   const dailySpend = useMemo(() => {
     if (!data?.daily) return [];
     return data.daily.map((d) => ({
-      date: d.date.slice(8), // "DD"
+      date: String(d.date || "").slice(8), // "DD"
       expenses: d.expenses,
       income: d.income,
     }));
   }, [data]);
 
+  // If API not loaded yet, show loading
   if (busy && !data) return <div className="card">Loading insights…</div>;
   if (err) return <div className="card" style={{ borderColor: "rgba(255,0,0,.3)" }}>{err}</div>;
-  if (!data) return null;
 
-  const { totals, overBudget, byCategory } = data;
+  // If API fails to return anything, still show summary KPIs (fallback)
+  const totals = data?.totals || {
+    income: incomeFallback,
+    expenses: spendFallback,
+    net: netFallback,
+    avgDailySpend: 0,
+    projectedSpend: 0,
+  };
+
+  const byCategory = Array.isArray(data?.byCategory) ? data.byCategory : [];
+  const overBudget = Array.isArray(data?.overBudget) ? data.overBudget : [];
 
   return (
     <div style={{ display: "grid", gap: 12 }}>
@@ -82,7 +110,11 @@ export default function InsightsPanel({ month }) {
         <Kpi title="Income" value={money(totals.income)} />
         <Kpi title="Expenses" value={money(totals.expenses)} />
         <Kpi title="Net" value={money(totals.net)} />
-        <Kpi title="Avg / day" value={money(totals.avgDailySpend)} sub={`Projected: ${money(totals.projectedSpend)}`} />
+        <Kpi
+          title="Avg / day"
+          value={money(totals.avgDailySpend)}
+          sub={totals.projectedSpend ? `Projected: ${money(totals.projectedSpend)}` : undefined}
+        />
       </div>
 
       {/* Charts */}
@@ -92,6 +124,7 @@ export default function InsightsPanel({ month }) {
             <h3 style={{ margin: 0 }}>Spending by Category</h3>
             <div style={{ opacity: 0.7, fontSize: 13 }}>Top {topCats.length}</div>
           </div>
+
           <div style={{ height: 320, marginTop: 8 }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={topCats} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
@@ -103,6 +136,10 @@ export default function InsightsPanel({ month }) {
               </BarChart>
             </ResponsiveContainer>
           </div>
+
+          {topCats.length === 0 && (
+            <div style={{ opacity: 0.75, marginTop: 8 }}>No category spending data yet.</div>
+          )}
         </div>
 
         <div className="card">
@@ -110,6 +147,7 @@ export default function InsightsPanel({ month }) {
             <h3 style={{ margin: 0 }}>Daily Trend</h3>
             <div style={{ opacity: 0.7, fontSize: 13 }}>{month}</div>
           </div>
+
           <div style={{ height: 320, marginTop: 8 }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={dailySpend} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
@@ -121,6 +159,10 @@ export default function InsightsPanel({ month }) {
               </LineChart>
             </ResponsiveContainer>
           </div>
+
+          {dailySpend.length === 0 && (
+            <div style={{ opacity: 0.75, marginTop: 8 }}>No daily trend data yet.</div>
+          )}
         </div>
       </div>
 
