@@ -89,19 +89,22 @@ app.set("trust proxy", 1);
 
 app.use(
   session({
-    name: "sid",
-    secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex"),
+    name: "balanceary.sid",
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    // ✅ no store = MemoryStore (fine for local dev)
     cookie: {
       httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      secure: true,          // REQUIRED for HTTPS
+      sameSite: "none",      // REQUIRED for cross-site cookies
       maxAge: 1000 * 60 * 60 * 24 * 30,
     },
+    store: new SqliteStore({
+      client: sessionDb,
+    }),
   })
 );
+
 
 /* ---------------------------
    Helpers
