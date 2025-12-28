@@ -1,76 +1,58 @@
 // server/index.js
-import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import session from "express-session";
-import Database from "better-sqlite3";
-import SqliteStoreFactory from "better-sqlite3-session-store";
+import "dotenv/config";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
-import OpenAI from "openai";
+import { createRequire } from "module";
 
-import prismaPkg from "@prisma/client";
-const { PrismaClient } = prismaPkg;
+import pkg from "@prisma/client";
+const { PrismaClient } = pkg;
 
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 
-import {
-  toISODate,
-  addDays,
-  expandRecurring,
-  buildTimeline,
-  summarize,
-} from "./forecast.js";
+// ------------------------------------
+// CJS deps (Node 20/24 + ESM safe)
+// ------------------------------------
+const require = createRequire(import.meta.url);
+const session = require("express-session");
 
+// ------------------------------------
+// App
+// ------------------------------------
 const app = express();
-app.set("trust proxy", 1);
+const API = "/api";
 
-// --------------------
-// Env
-// --------------------
-const DATABASE_URL = process.env.DATABASE_URL?.trim();
-if (!DATABASE_URL) {
-  throw new Error(
-    'Missing DATABASE_URL. For SQLite, set DATABASE_URL="file:./dev.db" in server/.env (or file:/var/data/budget.db on Render).'
-  );
-}
+/* ---------------------------
+   Middleware
+---------------------------- */
+app.use(express.json({ limit: "5mb" }));
 
-const NODE_ENV = process.env.NODE_ENV || "development";
-const IS_PROD = NODE_ENV === "production";
-
-// --------------------
-// Prisma (SQLite adapter)
-// --------------------
-const adapter = new PrismaBetterSqlite3({ url: DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
-
-// --------------------
-// Middleware
-// --------------------
-app.use(express.json());
-
-// --------------------
 // CORS
-// --------------------
-const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN || "").trim(); // e.g. https://balanceary.app
-
-const DEV_ALLOWED = new Set([
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:4173",
-  "http://127.0.0.1:4173",
-]);
+const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN || "http://localhost:5173").trim();
 
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // curl / server-to-server
-  if (!IS_PROD) return DEV_ALLOWED.has(origin) || origin === CLIENT_ORIGIN;
-  return origin === CLIENT_ORIGIN;
+  if (!origin) return true; // allow curl/postman
+  if (origin === CLIENT_ORIGIN) return true;
+
+  // local dev fallbacks
+  if (origin === "http://localhost:5173") return true;
+  if (origin === "http://127.0.0.1:5173") return true;
+
+  // custom domains
+  if (origin === "https://balanceary.app") return true;
+  if (origin === "https://www.balanceary.app") return true;
+
+  // vercel previews
+  if (/^https:\/\/.*\.vercel\.app$/.test(origin)) return true;
+
+  return false;
 }
 
 app.use(
   cors({
-    origin(origin, cb) {
+    origin: (origin, cb) => {
       if (isAllowedOrigin(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked: ${origin}`));
     },
@@ -78,128 +60,284 @@ app.use(
   })
 );
 
-// --------------------
-// Sessions: persistent SQLite store
-// --------------------
-const SESSION_SECRET = process.env.SESSION_SECRET || "dev_secret_change_me";
-const SESSIONS_DB_PATH =
-  process.env.SESSIONS_DB_PATH ||
-  (IS_PROD ? "/var/data/sessions.db" : "./sessions.db");
+// Rate limit
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
 
-const SqliteStore = SqliteStoreFactory(session);
-const sessionDb = new Database(SESSIONS_DB_PATH);
-
-try {
-  sessionDb.pragma("journal_mode = WAL");
-  sessionDb.pragma("synchronous = NORMAL");
-} catch {
-  // ignore
+/* ---------------------------
+   Prisma (Prisma 7 + SQLite adapter)
+---------------------------- */
+if (!process.env.DATABASE_URL) {
+  console.warn("⚠️ DATABASE_URL is not set. Example: file:./dev.db");
 }
+
+const adapter = new PrismaBetterSqlite3({
+  url: process.env.DATABASE_URL,
+});
+const prisma = new PrismaClient({ adapter });
+
+/* ---------------------------
+   Sessions
+---------------------------- */
+app.set("trust proxy", 1);
 
 app.use(
   session({
-    store: new SqliteStore({ client: sessionDb }),
-    name: "budget.sid",
-    secret: SESSION_SECRET,
+    name: "sid",
+    secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex"),
     resave: false,
     saveUninitialized: false,
-    rolling: true,
-    proxy: true,
+    // ✅ no store = MemoryStore (fine for local dev)
     cookie: {
       httpOnly: true,
-      secure: IS_PROD,
-      sameSite: IS_PROD ? "none" : "lax",
-      maxAge: 1000 * 60 * 60 * 24 * 14,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 1000 * 60 * 60 * 24 * 30,
     },
   })
 );
 
-// --------------------
-// Helpers
-// --------------------
+/* ---------------------------
+   Helpers
+---------------------------- */
 function requireAuth(req, res, next) {
-  if (!req.session?.userId) return res.status(401).json({ error: "Not logged in" });
+  if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
 
-function rotateSession(req, userId) {
-  return new Promise((resolve, reject) => {
-    req.session.regenerate((err) => {
-      if (err) return reject(err);
-      req.session.userId = userId;
-      req.session.save((err2) => (err2 ? reject(err2) : resolve()));
-    });
+function toStr(v) {
+  return v == null ? "" : String(v).trim();
+}
+
+function startOfDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+function isoDate(d) {
+  const x = startOfDay(d);
+  return x.toISOString().slice(0, 10);
+}
+
+function parseIsoDate(yyyyMmDd) {
+  const [y, m, d] = String(yyyyMmDd || "")
+    .split("-")
+    .map((x) => parseInt(x, 10));
+  if (!y || !m || !d) return null;
+  const dt = new Date(y, m - 1, d);
+  dt.setHours(0, 0, 0, 0);
+  return dt;
+}
+
+function addMonths(date, n) {
+  const x = new Date(date);
+  x.setMonth(x.getMonth() + n);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function addYears(date, n) {
+  const x = new Date(date);
+  x.setFullYear(x.getFullYear() + n);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function normalizeDateToIso(s) {
+  const str = toStr(s);
+  if (!str) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+
+  const m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (!m) return "";
+  const mm = m[1].padStart(2, "0");
+  const dd = m[2].padStart(2, "0");
+  const yyyy = m[3].length === 2 ? `20${m[3]}` : m[3];
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function makeImportHash(userId, date, merchant, amount, account) {
+  const raw = `${userId}|${date}|${merchant}|${amount}|${account}`;
+  return crypto.createHash("sha1").update(raw).digest("hex");
+}
+
+/* ---------------------------
+   Merchant -> Category rules (AUTO)
+   (merchant only)
+---------------------------- */
+function normalizeForMatch(s) {
+  return String(s || "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[^a-z0-9 ]/g, "");
+}
+
+function sortRulesBestFirst(rules) {
+  // longest match wins (more specific)
+  return (rules || [])
+    .slice()
+    .sort((a, b) => String(b.match || "").length - String(a.match || "").length);
+}
+
+function categoryFromRules(rules, merchantRaw) {
+  const merchant = normalizeForMatch(merchantRaw);
+  if (!merchant) return null;
+
+  for (const r of rules) {
+    const needle = normalizeForMatch(r.match);
+    if (!needle) continue;
+    if (merchant.includes(needle)) return String(r.category || "");
+  }
+  return null;
+}
+
+async function autoCategoryForMerchant(userId, merchant) {
+  const rulesRaw = await prisma.rule.findMany({
+    where: { userId },
+    select: { match: true, category: true },
+    orderBy: { createdAt: "desc" },
   });
+  const rules = sortRulesBestFirst(rulesRaw);
+  return categoryFromRules(rules, merchant) || "Uncategorized";
 }
 
-function hashToken(token) {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
-function makeToken() {
-  return crypto.randomBytes(32).toString("hex");
+/* ---------------------------
+   Recurring helpers
+---------------------------- */
+function monthlyOccurrencesWithinDayOfMonth(dayOfMonth, from, to) {
+  const dom = Math.max(1, Math.min(28, Number(dayOfMonth || 1)));
+
+  const start = startOfDay(from);
+  const end = startOfDay(to);
+
+  let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+  cursor.setHours(0, 0, 0, 0);
+
+  const out = [];
+  while (cursor <= end) {
+    const occurrence = new Date(cursor.getFullYear(), cursor.getMonth(), dom);
+    occurrence.setHours(0, 0, 0, 0);
+
+    if (occurrence >= start && occurrence <= end) out.push(isoDate(occurrence));
+    cursor = addMonths(cursor, 1);
+  }
+  return out;
 }
 
-const forgotPasswordLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many password reset attempts. Try again later." },
+function cadenceNextDateOccurrences(nextDateStr, cadence, from, to) {
+  const start = startOfDay(from);
+  const end = startOfDay(to);
+
+  const first = parseIsoDate(nextDateStr);
+  if (!first) return [];
+
+  let cur = startOfDay(first);
+  const out = [];
+
+  while (cur < start) {
+    if (cadence === "weekly") cur = addDays(cur, 7);
+    else if (cadence === "monthly") cur = addMonths(cur, 1);
+    else if (cadence === "quarterly") cur = addMonths(cur, 3);
+    else if (cadence === "yearly") cur = addYears(cur, 1);
+    else return [];
+  }
+
+  while (cur <= end) {
+    out.push(isoDate(cur));
+    if (cadence === "weekly") cur = addDays(cur, 7);
+    else if (cadence === "monthly") cur = addMonths(cur, 1);
+    else if (cadence === "quarterly") cur = addMonths(cur, 3);
+    else if (cadence === "yearly") cur = addYears(cur, 1);
+    else break;
+  }
+
+  return out;
+}
+
+/* ---------------------------
+   Health
+---------------------------- */
+app.get(`${API}/health`, (req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
 });
 
-function normalizeMerchant(desc) {
-  return String(desc || "")
-    .toLowerCase()
-    .replace(/(sq\*|paypal|visa|mastercard|debit|credit)/g, "")
-    .replace(/\b(inc|ltd|corp|co)\b/g, "")
-    .replace(/[^a-z0-9 ]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+/* ---------------------------
+   Route sanity list
+---------------------------- */
+app.get(`${API}/__routes`, (req, res) => {
+  const routes = app._router.stack
+    .filter((r) => r.route)
+    .map((r) => ({
+      method: Object.keys(r.route.methods)[0].toUpperCase(),
+      path: r.route.path,
+    }));
+  res.json({ count: routes.length, routes });
+});
 
-function daysBetween(a, b) {
-  return Math.abs((new Date(a).getTime() - new Date(b).getTime()) / 86400000);
-}
-
-function prismaMissingTableError(e) {
-  // Prisma "table does not exist" is often P2021
-  return e?.code === "P2021" || String(e?.message || "").includes("does not exist");
-}
-
-function subscriptionsNotReady(res, e) {
-  console.error("Subscriptions tables missing / not migrated:", e);
-  return res.status(500).json({
-    error:
-      "Subscriptions tables are not in your database yet. Run Prisma migrate to create them (see terminal instructions).",
-    code: e?.code || "SUBSCRIPTIONS_NOT_MIGRATED",
-  });
-}
-
-// --------------------
-// OpenAI (optional)
-// --------------------
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim();
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-// --------------------
-// Health
-// --------------------
-app.get("/api/health", (_req, res) => res.json({ ok: true, env: NODE_ENV }));
-
-app.get("/api/db-health", async (_req, res) => {
+/* ---------------------------
+   Auth
+---------------------------- */
+app.post(`${API}/auth/register`, async (req, res) => {
   try {
-    await prisma.$queryRaw`SELECT 1`;
-    res.json({ ok: true });
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: "email and password required" });
+
+    const existing = await prisma.user.findUnique({ where: { email: String(email) } });
+    if (existing) return res.status(400).json({ error: "Email already in use" });
+
+    const hash = await bcrypt.hash(String(password), 12);
+
+    const user = await prisma.user.create({
+      data: { email: String(email), passwordHash: hash },
+      select: { id: true, email: true, createdAt: true },
+    });
+
+    req.session.userId = user.id;
+    res.json({ user });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// --------------------
-// Auth
-// --------------------
-app.get("/api/auth/me", async (req, res) => {
+app.post(`${API}/auth/login`, async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: "email and password required" });
+
+    const user = await prisma.user.findUnique({ where: { email: String(email) } });
+    if (!user) return res.status(400).json({ error: "Invalid credentials" });
+
+    const ok = await bcrypt.compare(String(password), user.passwordHash);
+    if (!ok) return res.status(400).json({ error: "Invalid credentials" });
+
+    req.session.userId = user.id;
+    res.json({ user: { id: user.id, email: user.email } });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/auth/logout`, (req, res) => {
+  req.session?.destroy(() => res.json({ ok: true }));
+});
+
+app.get(`${API}/auth/me`, async (req, res) => {
   try {
     const userId = req.session?.userId;
     if (!userId) return res.json({ user: null });
@@ -209,1163 +347,956 @@ app.get("/api/auth/me", async (req, res) => {
       select: { id: true, email: true, createdAt: true },
     });
 
-    res.json({ user: user || null });
-  } catch (err) {
-    console.error("GET /api/auth/me failed:", err);
-    res.status(500).json({ error: "Failed to load session" });
-  }
-});
-
-app.post("/api/auth/register", async (req, res) => {
-  try {
-    const email = String(req.body.email || "").trim().toLowerCase();
-    const password = String(req.body.password || "");
-
-    if (!email.includes("@")) return res.status(400).json({ error: "Valid email required" });
-    if (password.length < 8) return res.status(400).json({ error: "Password must be 8+ chars" });
-
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    const user = await prisma.user.create({
-      data: { email, passwordHash },
-      select: { id: true, email: true, createdAt: true },
-    });
-
-    await rotateSession(req, user.id);
-    res.status(201).json({ user });
-  } catch (err) {
-    console.error("POST /api/auth/register failed:", err);
-    res.status(409).json({ error: "Email already in use" });
-  }
-});
-
-app.post("/api/auth/login", async (req, res) => {
-  try {
-    const email = String(req.body.email || "").trim().toLowerCase();
-    const password = String(req.body.password || "");
-
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
-
-    const ok = await bcrypt.compare(password, user.passwordHash);
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
-
-    await rotateSession(req, user.id);
-    res.json({ user: { id: user.id, email: user.email, createdAt: user.createdAt } });
-  } catch (err) {
-    console.error("POST /api/auth/login failed:", err);
-    res.status(500).json({ error: "Login failed" });
-  }
-});
-
-app.post("/api/auth/logout", (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
-});
-
-// --------------------
-// Password recovery (prints reset link to console)
-// --------------------
-app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
-  try {
-    const email = String(req.body.email || "").trim().toLowerCase();
-    res.json({ ok: true });
-    if (!email.includes("@")) return;
-
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return;
-
-    const token = makeToken();
-    const tokenHash = hashToken(token);
-    const expiresAt = new Date(Date.now() + 1000 * 60 * 60);
-
-    await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
-    await prisma.passwordResetToken.create({
-      data: { userId: user.id, tokenHash, expiresAt, usedAt: null },
-    });
-
-    const base = CLIENT_ORIGIN || "http://localhost:5173";
-    const resetUrl = `${base}/reset-password?email=${encodeURIComponent(email)}&token=${encodeURIComponent(token)}`;
-
-    console.log("\n=== Password Reset Link ===");
-    console.log(resetUrl);
-    console.log("===========================\n");
-  } catch (err) {
-    console.error("POST /api/auth/forgot-password failed:", err);
-  }
-});
-
-app.post("/api/auth/reset-password", async (req, res) => {
-  try {
-    const email = String(req.body.email || "").trim().toLowerCase();
-    const token = String(req.body.token || "").trim();
-    const newPassword = String(req.body.newPassword || "");
-
-    if (!email.includes("@")) return res.status(400).json({ error: "Valid email required" });
-    if (!token) return res.status(400).json({ error: "Token required" });
-    if (newPassword.length < 8) return res.status(400).json({ error: "Password must be 8+ chars" });
-
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(400).json({ error: "Invalid reset link" });
-
-    const tokenHash = hashToken(token);
-    const now = new Date();
-
-    const record = await prisma.passwordResetToken.findFirst({
-      where: { userId: user.id, tokenHash, usedAt: null, expiresAt: { gt: now } },
-    });
-    if (!record) return res.status(400).json({ error: "Invalid or expired reset link" });
-
-    const passwordHash = await bcrypt.hash(newPassword, 10);
-
-    await prisma.$transaction([
-      prisma.user.update({ where: { id: user.id }, data: { passwordHash } }),
-      prisma.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: now } }),
-    ]);
-
-    await rotateSession(req, user.id);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("POST /api/auth/reset-password failed:", err);
-    res.status(500).json({ error: "Reset failed" });
-  }
-});
-
-// --------------------
-// Profile
-// --------------------
-app.post("/api/profile/change-password", requireAuth, async (req, res) => {
-  try {
-    const currentPassword = String(req.body.currentPassword || "");
-    const newPassword = String(req.body.newPassword || "");
-
-    if (newPassword.length < 8) return res.status(400).json({ error: "New password must be 8+ chars" });
-
-    const user = await prisma.user.findUnique({
-      where: { id: req.session.userId },
-      select: { id: true, passwordHash: true },
-    });
-    if (!user) return res.status(401).json({ error: "Not logged in" });
-
-    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
-    if (!ok) return res.status(401).json({ error: "Current password is incorrect" });
-
-    const passwordHash = await bcrypt.hash(newPassword, 10);
-    await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
-
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("POST /api/profile/change-password failed:", err);
-    res.status(500).json({ error: "Failed to change password" });
-  }
-});
-
-// --------------------
-// Categories
-// --------------------
-app.get("/api/categories", requireAuth, async (req, res) => {
-  try {
-    const categories = await prisma.category.findMany({
-      where: { userId: req.session.userId },
-      orderBy: { name: "asc" },
-    });
-    res.json({ categories });
-  } catch (err) {
-    console.error("GET /api/categories failed:", err);
-    res.status(500).json({ error: "Failed to load categories" });
-  }
-});
-
-app.post("/api/categories", requireAuth, async (req, res) => {
-  try {
-    const name = String(req.body.name || "").trim();
-    if (!name) return res.status(400).json({ error: "Category name required" });
-
-    const existing = await prisma.category.findFirst({
-      where: { userId: req.session.userId, name },
-      select: { id: true },
-    });
-    if (existing) return res.status(409).json({ error: "Category already exists" });
-
-    const category = await prisma.category.create({
-      data: { userId: req.session.userId, name },
-    });
-
-    res.status(201).json({ category });
-  } catch (err) {
-    console.error("POST /api/categories failed:", err);
-    res.status(500).json({ error: "Failed to add category" });
-  }
-});
-
-app.delete("/api/categories/:id", requireAuth, async (req, res) => {
-  try {
-    const id = String(req.params.id);
-    await prisma.category.deleteMany({ where: { id, userId: req.session.userId } });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("DELETE /api/categories/:id failed:", err);
-    res.status(500).json({ error: "Failed to delete category" });
-  }
-});
-
-// --------------------
-// Rules
-// --------------------
-app.get("/api/rules", requireAuth, async (req, res) => {
-  try {
-    const rules = await prisma.rule.findMany({
-      where: { userId: req.session.userId },
-      orderBy: { createdAt: "desc" },
-    });
-    res.json({ rules });
-  } catch (err) {
-    console.error("GET /api/rules failed:", err);
-    res.status(500).json({ error: "Failed to load rules" });
-  }
-});
-
-app.post("/api/rules", requireAuth, async (req, res) => {
-  try {
-    const match = String(req.body.match ?? "").trim().toLowerCase();
-    const category = String(req.body.category ?? "").trim();
-
-    if (!match) return res.status(400).json({ error: "match is required" });
-    if (!category) return res.status(400).json({ error: "category is required" });
-
-    const rule = await prisma.rule.create({
-      data: { userId: req.session.userId, match, category },
-    });
-
-    res.status(201).json({ rule });
-  } catch (err) {
-    console.error("POST /api/rules failed:", err);
-    res.status(500).json({ error: "Failed to add rule" });
-  }
-});
-
-app.delete("/api/rules/:id", requireAuth, async (req, res) => {
-  try {
-    const id = String(req.params.id);
-    await prisma.rule.deleteMany({ where: { id, userId: req.session.userId } });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("DELETE /api/rules/:id failed:", err);
-    res.status(500).json({ error: "Failed to delete rule" });
-  }
-});
-
-// --------------------
-// Budgets
-// --------------------
-app.get("/api/budgets", requireAuth, async (req, res) => {
-  try {
-    const month = String(req.query.month || "").trim();
-    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month is required (YYYY-MM)" });
-
-    const budgets = await prisma.budget.findMany({
-      where: { userId: req.session.userId, month },
-      orderBy: [{ category: "asc" }],
-    });
-
-    res.json({ budgets });
-  } catch (err) {
-    console.error("GET /api/budgets failed:", err);
-    res.status(500).json({ error: "Failed to load budgets" });
-  }
-});
-
-app.post("/api/budgets", requireAuth, async (req, res) => {
-  try {
-    const month = String(req.body.month || "").trim();
-    const category = String(req.body.category || "").trim();
-    const amount = Number(req.body.amount);
-
-    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month is required (YYYY-MM)" });
-    if (!category) return res.status(400).json({ error: "category is required" });
-    if (!Number.isFinite(amount)) return res.status(400).json({ error: "amount must be a number" });
-
-    const existing = await prisma.budget.findFirst({
-      where: { userId: req.session.userId, month, category },
-      select: { id: true },
-    });
-
-    const budget = existing
-      ? await prisma.budget.update({ where: { id: existing.id }, data: { amount } })
-      : await prisma.budget.create({ data: { userId: req.session.userId, month, category, amount } });
-
-    res.status(201).json({ budget });
-  } catch (err) {
-    console.error("POST /api/budgets failed:", err);
-    res.status(500).json({ error: "Failed to save budget" });
-  }
-});
-
-// --------------------
-// Transactions
-// --------------------
-app.get("/api/transactions", requireAuth, async (req, res) => {
-  try {
-    const month = String(req.query.month || "").trim();
-    const baseWhere = { userId: req.session.userId };
-
-    const txWhere =
-      month && /^\d{4}-\d{2}$/.test(month) ? { ...baseWhere, date: { startsWith: `${month}-` } } : baseWhere;
-
-    const transactions = await prisma.transaction.findMany({
-      where: txWhere,
-      orderBy: { date: "desc" },
-    });
-
-    res.json({ transactions });
-  } catch (err) {
-    console.error("GET /api/transactions failed:", err);
-    res.status(500).json({ error: "Failed to load transactions" });
-  }
-});
-
-app.post("/api/transactions", requireAuth, async (req, res) => {
-  try {
-    const date = String(req.body.date || "").trim();
-    const amount = Number(req.body.amount);
-    const category = String(req.body.category || "").trim();
-    const merchant = String(req.body.merchant || "").trim();
-    const account = String(req.body.account || "").trim();
-    const note = String(req.body.note || "").trim();
-
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
-    if (!Number.isFinite(amount)) return res.status(400).json({ error: "amount must be a number" });
-
-    const transaction = await prisma.transaction.create({
-      data: {
-        userId: req.session.userId,
-        date,
-        amount,
-        category: category || "Uncategorized",
-        merchant: merchant || "Unknown",
-        account: account || "Default",
-        note,
-        source: "manual",
-      },
-    });
-
-    res.status(201).json({ transaction });
-  } catch (err) {
-    console.error("POST /api/transactions failed:", err);
-    res.status(500).json({ error: "Failed to add transaction" });
-  }
-});
-
-app.put("/api/transactions/:id", requireAuth, async (req, res) => {
-  try {
-    const id = String(req.params.id);
-
-    const patch = {};
-    if (req.body.date != null) {
-      const v = String(req.body.date).trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
-      patch.date = v;
-    }
-    if (req.body.amount != null) {
-      const v = Number(req.body.amount);
-      if (!Number.isFinite(v)) return res.status(400).json({ error: "amount must be a number" });
-      patch.amount = v;
-    }
-    if (req.body.category != null) patch.category = String(req.body.category).trim();
-    if (req.body.merchant != null) patch.merchant = String(req.body.merchant).trim();
-    if (req.body.account != null) patch.account = String(req.body.account).trim();
-    if (req.body.note != null) patch.note = String(req.body.note).trim();
-
-    const updated = await prisma.transaction.updateMany({
-      where: { id, userId: req.session.userId },
-      data: patch,
-    });
-
-    if (updated.count === 0) return res.status(404).json({ error: "Transaction not found" });
-
-    const transaction = await prisma.transaction.findFirst({ where: { id, userId: req.session.userId } });
-    res.json({ transaction });
-  } catch (err) {
-    console.error("PUT /api/transactions/:id failed:", err);
-    res.status(500).json({ error: "Failed to update transaction" });
-  }
-});
-
-app.delete("/api/transactions/:id", requireAuth, async (req, res) => {
-  try {
-    const id = String(req.params.id);
-    await prisma.transaction.deleteMany({ where: { id, userId: req.session.userId } });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("DELETE /api/transactions/:id failed:", err);
-    res.status(500).json({ error: "Failed to delete transaction" });
-  }
-});
-
-// --------------------
-// Recurring
-// --------------------
-app.get("/api/recurring", requireAuth, async (req, res) => {
-  try {
-    const recurring = await prisma.recurring.findMany({
-      where: { userId: req.session.userId },
-      orderBy: { createdAt: "desc" },
-    });
-    res.json({ recurring });
-  } catch (err) {
-    console.error("GET /api/recurring failed:", err);
-    res.status(500).json({ error: "Failed to load recurring" });
-  }
-});
-
-app.post("/api/recurring", requireAuth, async (req, res) => {
-  try {
-    const name = String(req.body.name || "").trim();
-    const amount = Number(req.body.amount);
-    const category = String(req.body.category || "").trim();
-    const merchant = String(req.body.merchant || "").trim();
-    const account = String(req.body.account || "").trim();
-    const note = String(req.body.note || "").trim();
-    const dayOfMonth = Number(req.body.dayOfMonth);
-    const isActive = req.body.isActive == null ? true : Boolean(req.body.isActive);
-
-    if (!name) return res.status(400).json({ error: "name is required" });
-    if (!Number.isFinite(amount)) return res.status(400).json({ error: "amount must be a number" });
-    if (!Number.isFinite(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 28) {
-      return res.status(400).json({ error: "dayOfMonth must be 1..28" });
-    }
-
-    const rec = await prisma.recurring.create({
-      data: {
-        userId: req.session.userId,
-        name,
-        amount,
-        category: category || "Uncategorized",
-        merchant: merchant || "Unknown",
-        account: account || "Default",
-        note,
-        dayOfMonth,
-        isActive,
-      },
-    });
-
-    res.status(201).json({ recurring: rec });
-  } catch (err) {
-    console.error("POST /api/recurring failed:", err);
-    res.status(500).json({ error: "Failed to add recurring" });
-  }
-});
-
-app.patch("/api/recurring/:id", requireAuth, async (req, res) => {
-  try {
-    const id = String(req.params.id);
-    const isActive = Boolean(req.body.isActive);
-
-    const updated = await prisma.recurring.updateMany({
-      where: { id, userId: req.session.userId },
-      data: { isActive },
-    });
-
-    if (updated.count === 0) return res.status(404).json({ error: "Recurring not found" });
-
-    const recurring = await prisma.recurring.findFirst({ where: { id, userId: req.session.userId } });
-    res.json({ recurring });
-  } catch (err) {
-    console.error("PATCH /api/recurring/:id failed:", err);
-    res.status(500).json({ error: "Failed to update recurring" });
-  }
-});
-
-app.delete("/api/recurring/:id", requireAuth, async (req, res) => {
-  try {
-    const id = String(req.params.id);
-    await prisma.recurring.deleteMany({ where: { id, userId: req.session.userId } });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("DELETE /api/recurring/:id failed:", err);
-    res.status(500).json({ error: "Failed to delete recurring" });
-  }
-});
-
-app.post("/api/recurring/generate", requireAuth, async (req, res) => {
-  try {
-    const month = String(req.query.month || "").trim();
-    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month is required (YYYY-MM)" });
-
-    const recurring = await prisma.recurring.findMany({
-      where: { userId: req.session.userId, isActive: true },
-      orderBy: { createdAt: "asc" },
-    });
-
-    const created = [];
-    for (const r of recurring) {
-      const day = Math.min(r.dayOfMonth, 28);
-      const date = `${month}-${String(day).padStart(2, "0")}`;
-
-      const importHash = crypto
-        .createHash("sha256")
-        .update(`${req.session.userId}|recurring|${r.id}|${month}`)
-        .digest("hex");
-
-      const exists = await prisma.transaction.findFirst({
-        where: { userId: req.session.userId, importHash },
-        select: { id: true },
-      });
-      if (exists) continue;
-
-      const tx = await prisma.transaction.create({
-        data: {
-          userId: req.session.userId,
-          date,
-          amount: r.amount,
-          category: r.category,
-          merchant: r.merchant,
-          account: r.account,
-          note: r.note,
-          source: "recurring",
-          recurringId: r.id,
-          importHash,
-        },
-      });
-
-      created.push(tx);
-    }
-
-    res.json({ ok: true, createdCount: created.length, created });
-  } catch (err) {
-    console.error("POST /api/recurring/generate failed:", err);
-    res.status(500).json({ error: "Failed to generate recurring" });
-  }
-});
-
-// --------------------
-// Subscriptions & Bills
-// --------------------
-
-// Detect candidates from transactions (merchant-based)
-app.get("/api/subscriptions/candidates", requireAuth, async (req, res) => {
-  try {
-    const userId = req.session.userId;
-
-    const txs = await prisma.transaction.findMany({
-      where: { userId, amount: { lt: 0 } },
-      orderBy: { date: "asc" },
-    });
-
-    // If the ignore table doesn't exist yet, just treat as none ignored (don’t crash)
-    let ignoredKeys = new Set();
-    try {
-      const ignored = await prisma.subscriptionIgnore.findMany({
-        where: { userId },
-        select: { merchantKey: true },
-      });
-      ignoredKeys = new Set(ignored.map((i) => i.merchantKey));
-    } catch (e) {
-      if (!prismaMissingTableError(e)) throw e;
-    }
-
-    const groups = {};
-    for (const t of txs) {
-      // ✅ FIX: model uses merchant (not description)
-      const key = normalizeMerchant(t.merchant || "");
-      if (!key || ignoredKeys.has(key)) continue;
-      groups[key] ||= [];
-      groups[key].push(t);
-    }
-
-    const candidates = [];
-
-    for (const [merchantKey, items] of Object.entries(groups)) {
-      if (items.length < 3) continue;
-
-      const gaps = [];
-      for (let i = 1; i < items.length; i++) {
-        gaps.push(daysBetween(items[i].date, items[i - 1].date));
-      }
-
-      const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-
-      // monthly-ish window
-      if (avgGap < 25 || avgGap > 35) continue;
-
-      const amounts = items
-        .map((i) => Math.abs(Number(i.amount) || 0))
-        .filter((n) => n > 0);
-
-      if (!amounts.length) continue;
-
-      const min = Math.min(...amounts);
-      const max = Math.max(...amounts);
-
-      // within 25% variance
-      if (min > 0 && max / min > 1.25) continue;
-
-      const confidence =
-        50 + Math.min(30, items.length * 5) + Math.max(0, 20 - Math.abs(30 - avgGap));
-
-      candidates.push({
-        merchantKey,
-        displayName: merchantKey.replace(/\b\w/g, (l) => l.toUpperCase()),
-        cadence: "monthly",
-        expectedAmount: Number((amounts.reduce((a, b) => a + b, 0) / amounts.length).toFixed(2)),
-        lastDate: items[items.length - 1].date,
-        confidence: Math.min(100, Math.round(confidence)),
-      });
-    }
-
-    res.json({ candidates });
+    res.json({ user });
   } catch (e) {
-    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
-    console.error("GET /api/subscriptions/candidates failed:", e);
-    res.status(500).json({ error: "Failed to compute candidates" });
-  }
-});
-
-// List saved subscriptions/bills
-app.get("/api/subscriptions", requireAuth, async (req, res) => {
-  try {
-    const userId = req.session.userId;
-
-    const subscriptions = await prisma.subscription.findMany({
-      where: { userId },
-      orderBy: { updatedAt: "desc" },
-    });
-
-    res.json({ subscriptions });
-  } catch (e) {
-    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
-    console.error("GET /api/subscriptions failed:", e);
-    res.status(500).json({ error: "Failed to load subscriptions" });
-  }
-});
-
-// Create or update by unique (userId, merchantKey)
-app.post("/api/subscriptions", requireAuth, async (req, res) => {
-  try {
-    const userId = req.session.userId;
-
-    const payload = req.body || {};
-    const merchantKey = String(payload.merchantKey || "").trim();
-    if (!merchantKey) return res.status(400).json({ error: "merchantKey required" });
-
-    const data = {
-      userId,
-      merchantKey,
-      displayName: payload.displayName ? String(payload.displayName) : merchantKey,
-      cadence: payload.cadence ? String(payload.cadence) : "unknown",
-      expectedAmount: payload.expectedAmount == null ? null : Number(payload.expectedAmount),
-      amountMin: payload.amountMin == null ? null : Number(payload.amountMin),
-      amountMax: payload.amountMax == null ? null : Number(payload.amountMax),
-      lastDate: payload.lastDate ? String(payload.lastDate) : null,
-      nextDate: payload.nextDate ? String(payload.nextDate) : null,
-      confidence: payload.confidence == null ? 0 : Number(payload.confidence),
-      isActive: payload.isActive == null ? true : Boolean(payload.isActive),
-      kind: payload.kind ? String(payload.kind) : "subscription",
-      categoryId: payload.categoryId ? String(payload.categoryId) : null,
-      notes: payload.notes ? String(payload.notes) : null,
-    };
-
-    const subscription = await prisma.subscription.upsert({
-      where: { userId_merchantKey: { userId, merchantKey } },
-      create: data,
-      update: data,
-    });
-
-    res.json({ subscription });
-  } catch (e) {
-    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
-    console.error("POST /api/subscriptions failed:", e);
-    res.status(500).json({ error: "Failed to save subscription" });
-  }
-});
-
-// Patch fields
-app.patch("/api/subscriptions/:id", requireAuth, async (req, res) => {
-  try {
-    const userId = req.session.userId;
-    const id = String(req.params.id);
-
-    const patch = req.body || {};
-    const allowed = [
-      "displayName",
-      "cadence",
-      "expectedAmount",
-      "amountMin",
-      "amountMax",
-      "lastDate",
-      "nextDate",
-      "confidence",
-      "isActive",
-      "kind",
-      "categoryId",
-      "notes",
-    ];
-
-    const data = {};
-    for (const k of allowed) {
-      if (patch[k] === undefined) continue;
-      if (k === "expectedAmount" || k === "amountMin" || k === "amountMax") {
-        data[k] = patch[k] == null ? null : Number(patch[k]);
-      } else if (k === "confidence") {
-        data[k] = patch[k] == null ? 0 : Number(patch[k]);
-      } else if (k === "isActive") {
-        data[k] = Boolean(patch[k]);
-      } else if (k === "lastDate" || k === "nextDate") {
-        data[k] = patch[k] ? String(patch[k]) : null;
-      } else {
-        data[k] = patch[k] == null ? null : String(patch[k]);
-      }
-    }
-
-    const updated = await prisma.subscription.updateMany({
-      where: { id, userId },
-      data,
-    });
-
-    if (!updated.count) return res.status(404).json({ error: "Not found" });
-
-    const subscription = await prisma.subscription.findFirst({ where: { id, userId } });
-    res.json({ subscription });
-  } catch (e) {
-    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
-    console.error("PATCH /api/subscriptions/:id failed:", e);
-    res.status(500).json({ error: "Failed to update subscription" });
-  }
-});
-
-app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
-  try {
-    const userId = req.session.userId;
-    const id = String(req.params.id);
-
-    await prisma.subscription.deleteMany({ where: { id, userId } });
-    res.json({ ok: true });
-  } catch (e) {
-    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
-    console.error("DELETE /api/subscriptions/:id failed:", e);
-    res.status(500).json({ error: "Failed to delete subscription" });
-  }
-});
-
-// Ignore merchantKey (stop showing in candidates)
-app.post("/api/subscriptions/ignore", requireAuth, async (req, res) => {
-  try {
-    const userId = req.session.userId;
-    const merchantKey = String(req.body?.merchantKey || "").trim();
-    if (!merchantKey) return res.status(400).json({ error: "merchantKey required" });
-
-    await prisma.subscriptionIgnore.upsert({
-      where: { userId_merchantKey: { userId, merchantKey } },
-      create: { userId, merchantKey },
-      update: {}, // nothing
-    });
-
-    res.json({ ok: true });
-  } catch (e) {
-    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
-    console.error("POST /api/subscriptions/ignore failed:", e);
-    res.status(500).json({ error: "Failed to ignore merchant" });
-  }
-});
-
-// --------------------
-// CSV Import (same logic you had)
-// --------------------
-function toStr(v) {
-  return v == null ? "" : String(v).trim();
-}
-function parseAmount(v) {
-  const s = toStr(v).replace(/[$,]/g, "");
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-function normalizeDateToYMD(v, monthHint) {
-  const s = toStr(v);
-  if (!s) return "";
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replaceAll("/", "-");
-
-  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
-  if (m) {
-    let a = Number(m[1]);
-    let b = Number(m[2]);
-    const y = Number(m[3]);
-    let mm = a;
-    let dd = b;
-    if (a > 12 && b <= 12) {
-      dd = a;
-      mm = b;
-    }
-    return `${y}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
-  }
-
-  if (/^\d{1,2}$/.test(s) && monthHint && /^\d{4}-\d{2}$/.test(monthHint)) {
-    return `${monthHint}-${String(Number(s)).padStart(2, "0")}`;
-  }
-
-  return "";
-}
-
-app.post("/api/import/csv/dry-run", requireAuth, async (req, res) => {
-  try {
-    const month = String(req.body.month || "").trim();
-    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
-    const mapping = req.body.mapping || {};
-
-    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month is required (YYYY-MM)" });
-    if (!rows.length) return res.status(400).json({ error: "rows is required" });
-    if (!mapping?.date || !mapping?.amount) {
-      return res.status(400).json({ error: "mapping.date and mapping.amount are required" });
-    }
-
-    const preview = [];
-    let okCount = 0;
-
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i] || {};
-      const dateRaw = r[mapping.date];
-      const amountRaw = r[mapping.amount];
-      const descRaw = mapping.description ? r[mapping.description] : "";
-
-      const date = normalizeDateToYMD(dateRaw, month);
-      const amount = parseAmount(amountRaw);
-      const merchant = toStr(descRaw) || "Unknown";
-
-      const good = /^\d{4}-\d{2}-\d{2}$/.test(date) && amount != null;
-      if (good) okCount++;
-
-      preview.push({
-        row: i + 1,
-        ok: good,
-        date,
-        amount,
-        merchant,
-        raw: { date: dateRaw, amount: amountRaw, description: descRaw },
-      });
-    }
-
-    res.json({ ok: true, total: rows.length, okCount, preview: preview.slice(0, 50) });
-  } catch (err) {
-    console.error("POST /api/import/csv/dry-run failed:", err);
-    res.status(500).json({ error: "Dry run failed" });
-  }
-});
-
-app.post("/api/import/csv", requireAuth, async (req, res) => {
-  try {
-    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
-    const source = String(req.body.source || "csv").trim();
-
-    if (!rows.length) return res.status(400).json({ error: "rows is required" });
-
-    let inserted = 0;
-    let skipped = 0;
-
-    for (const r of rows) {
-      const date = normalizeDateToYMD(r.date, "");
-      const amount = parseAmount(r.amount ?? r.Amount ?? r.AMOUNT);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || amount == null) {
-        skipped++;
-        continue;
-      }
-
-      const category = toStr(r.category) || "Uncategorized";
-      const merchant = toStr(r.merchant) || toStr(r.description) || "Unknown";
-      const account = toStr(r.account) || "Default";
-      const note = toStr(r.note) || "";
-
-      const importHash = crypto
-        .createHash("sha256")
-        .update(`${req.session.userId}|${source}|${date}|${amount}|${category}|${merchant}|${account}|${note}`)
-        .digest("hex");
-
-      const exists = await prisma.transaction.findFirst({
-        where: { userId: req.session.userId, importHash },
-        select: { id: true },
-      });
-      if (exists) {
-        skipped++;
-        continue;
-      }
-
-      await prisma.transaction.create({
-        data: {
-          userId: req.session.userId,
-          date,
-          amount,
-          category,
-          merchant,
-          account,
-          note,
-          source,
-          importHash,
-        },
-      });
-      inserted++;
-    }
-
-    res.json({ ok: true, inserted, skipped });
-  } catch (err) {
-    console.error("POST /api/import/csv failed:", err);
-    res.status(500).json({ error: "Import failed" });
-  }
-});
-
-// --------------------
-// Insights (unchanged)
-// --------------------
-app.get("/insights", async (req, res) => {
-  try {
-    if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
-
-    const userId = req.session.userId;
-    const month = String(req.query.month || "").trim();
-
-    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be YYYY-MM" });
-
-    const start = `${month}-01`;
-    const endMonth = (() => {
-      const [y, m] = month.split("-").map(Number);
-      const d = new Date(Date.UTC(y, m - 1, 1));
-      d.setUTCMonth(d.getUTCMonth() + 1);
-      const yy = d.getUTCFullYear();
-      const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-      return `${yy}-${mm}`;
-    })();
-    const end = `${endMonth}-01`;
-
-    const txns = await prisma.transaction.findMany({
-      where: { userId, date: { gte: start, lt: end } },
-      select: { date: true, amount: true, category: true },
-      orderBy: { date: "asc" },
-    });
-
-    const budgets = await prisma.budget.findMany({
-      where: { userId, month },
-      select: { category: true, amount: true },
-    });
-
-    const budgetByCat = new Map();
-    for (const b of budgets) budgetByCat.set(b.category, Number(b.amount) || 0);
-
-    let income = 0;
-    let expenses = 0;
-
-    const byCategory = new Map();
-    const daily = new Map();
-
-    for (const t of txns) {
-      const amt = Number(t.amount) || 0;
-      const cat = (t.category || "Uncategorized").trim() || "Uncategorized";
-      const day = t.date;
-
-      if (!daily.has(day)) daily.set(day, { date: day, income: 0, expenses: 0 });
-
-      if (amt >= 0) {
-        income += amt;
-        daily.get(day).income += amt;
-      } else {
-        const out = Math.abs(amt);
-        expenses += out;
-        daily.get(day).expenses += out;
-        byCategory.set(cat, (byCategory.get(cat) || 0) + out);
-      }
-    }
-
-    const net = income - expenses;
-
-    const daysInMonth = (() => {
-      const [y, m] = month.split("-").map(Number);
-      return new Date(Date.UTC(y, m, 0)).getUTCDate();
-    })();
-
-    const dailySeries = [];
-    for (let d = 1; d <= daysInMonth; d++) {
-      const dd = String(d).padStart(2, "0");
-      const key = `${month}-${dd}`;
-      dailySeries.push(daily.get(key) || { date: key, income: 0, expenses: 0 });
-    }
-
-    const avgDailySpend = daysInMonth ? expenses / daysInMonth : 0;
-    const projectedSpend = avgDailySpend * daysInMonth;
-
-    const cats = new Set([...byCategory.keys(), ...budgetByCat.keys()]);
-    const byCategoryList = Array.from(cats).map((categoryName) => {
-      const spent = byCategory.get(categoryName) || 0;
-      const budget = budgetByCat.get(categoryName) || 0;
-      const pctUsed = budget > 0 ? (spent / budget) * 100 : null;
-      return { categoryName, spent, budget, pctUsed };
-    });
-
-    byCategoryList.sort((a, b) => b.spent - a.spent);
-
-    const overBudget = byCategoryList
-      .filter((c) => (c.budget || 0) > 0 && c.spent > c.budget)
-      .map((c) => ({
-        categoryName: c.categoryName,
-        spent: c.spent,
-        budget: c.budget,
-        overBy: c.spent - c.budget,
-      }))
-      .sort((a, b) => b.overBy - a.overBy);
-
-    res.json({
-      month,
-      totals: { income, expenses, net, avgDailySpend, projectedSpend },
-      byCategory: byCategoryList,
-      daily: dailySeries,
-      overBudget,
-    });
-  } catch (err) {
-    console.error(err);
+    console.error(e);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// --------------------
-// Forecast (unchanged)
-// --------------------
-app.get("/api/forecast", async (req, res) => {
+/* ---------------------------
+   Settings
+---------------------------- */
+app.get(`${API}/settings`, requireAuth, async (req, res) => {
   try {
-    if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
-
     const userId = req.session.userId;
 
-    const days = Math.max(7, Math.min(90, Number(req.query.days || 30)));
-    const startISO = toISODate(new Date());
-    const endISO = toISODate(addDays(new Date(), days - 1));
+    const settings =
+      (await prisma.userSettings.findUnique({ where: { userId } })) ||
+      (await prisma.userSettings.create({ data: { userId } }));
 
-    const agg = await prisma.transaction.aggregate({
-      where: { userId, date: { lte: startISO } },
-      _sum: { amount: true },
+    res.json(settings);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/settings/balance`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { currentBalance } = req.body || {};
+    const num = Number(currentBalance);
+    if (!Number.isFinite(num)) return res.status(400).json({ error: "Invalid currentBalance" });
+
+    const settings = await prisma.userSettings.upsert({
+      where: { userId },
+      update: { currentBalance: num },
+      create: { userId, currentBalance: num },
     });
 
-    const openingBalance = Number(agg?._sum?.amount || 0);
+    res.json(settings);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
-    const futureTx = await prisma.transaction.findMany({
-      where: { userId, date: { gte: startISO, lte: endISO } },
-      select: { id: true, date: true, amount: true },
-      orderBy: [{ date: "asc" }],
-    });
+/* ---------------------------
+   Forecast  ✅ (single source of truth)
+   - Uses userSettings.currentBalance
+   - Adds monthly recurring + subscription occurrences
+   - Estimates daily variable from last 90 days net (clamped <= 0)
+   - Day 0 = startBalance (no delta applied on day 0)
+---------------------------- */
+app.get(`${API}/forecast`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
 
-    const txEvents = futureTx.map((t) => ({
-      kind: "transaction",
-      transactionId: t.id,
-      date: t.date,
-      amount: Number(t.amount) || 0,
-      description: "Transaction",
-    }));
+    const days = Math.max(7, Math.min(180, Number(req.query.days || 60)));
+    const from = startOfDay(new Date());
+    const to = addDays(from, days);
 
+    const settings =
+      (await prisma.userSettings.findUnique({ where: { userId } })) ||
+      (await prisma.userSettings.create({ data: { userId } }));
+
+    const startBalance = Number(settings.currentBalance || 0);
+    let balance = startBalance;
+
+    // Monthly recurring (your model)
     const recurring = await prisma.recurring.findMany({
+      where: { userId, isActive: true },
+      select: { id: true, name: true, amount: true, dayOfMonth: true },
+    });
+
+    // Subscriptions (your model)
+    const subs = await prisma.subscription.findMany({
+      where: {
+        userId,
+        isActive: true,
+        nextDate: { not: null },
+        cadence: { in: ["weekly", "monthly", "quarterly", "yearly"] },
+      },
+      select: {
+        id: true,
+        displayName: true,
+        expectedAmount: true,
+        amountMin: true,
+        amountMax: true,
+        nextDate: true,
+        cadence: true,
+      },
+    });
+
+    // Variable spend estimate (avg daily NET over last 90 days, clamped to <= 0)
+    const todayIso = isoDate(from);
+    const ninetyDaysAgoIso = isoDate(addDays(from, -90));
+
+    const tx = await prisma.transaction.findMany({
+      where: { userId, date: { gte: ninetyDaysAgoIso, lt: todayIso } },
+      select: { amount: true },
+    });
+
+    const net90 = tx.reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const avgDailyNet = net90 / 90;
+    const estimatedDailyVariable = Math.min(0, avgDailyNet);
+
+    // Initialize daily deltas
+    const deltas = {};
+    for (let i = 0; i <= days; i++) {
+      const d = isoDate(addDays(from, i));
+      deltas[d] = { recurring: 0, variable: estimatedDailyVariable };
+    }
+
+    // Monthly recurring occurrences
+    for (const r of recurring) {
+      const dates = monthlyOccurrencesWithinDayOfMonth(r.dayOfMonth, from, to);
+      for (const d of dates) deltas[d].recurring += Number(r.amount || 0);
+    }
+
+    // Subscription occurrences
+    for (const s of subs) {
+      const amt = Number(s.expectedAmount ?? s.amountMax ?? s.amountMin ?? 0);
+      if (!Number.isFinite(amt) || amt === 0) continue;
+      const dates = cadenceNextDateOccurrences(s.nextDate, s.cadence, from, to);
+      for (const d of dates) if (deltas[d]) deltas[d].recurring += amt;
+    }
+
+    // Build series
+    const series = [];
+    let lowest = { date: isoDate(from), balance };
+
+    // Day 0: starting point (no delta)
+    series.push({
+      date: isoDate(from),
+      delta: 0,
+      balance,
+      breakdown: { recurring: 0, variable: 0 },
+    });
+
+    // Days 1..N apply deltas
+    for (let i = 1; i <= days; i++) {
+      const d = isoDate(addDays(from, i));
+      const day = deltas[d] || { recurring: 0, variable: 0 };
+      const delta = (day.recurring || 0) + (day.variable || 0);
+
+      balance = balance + delta;
+
+      if (balance < lowest.balance) lowest = { date: d, balance };
+
+      series.push({
+        date: d,
+        delta,
+        balance,
+        breakdown: {
+          recurring: day.recurring || 0,
+          variable: day.variable || 0,
+        },
+      });
+    }
+
+    res.json({
+      days,
+      startBalance,
+      estimatedDailyVariable,
+      lowest,
+      series,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* =========================================================
+   CSV Import
+   - POST /api/import/csv
+   - POST /api/import/csv/dry-run
+   Uses MANUAL dedupe (no skipDuplicates)
+========================================================= */
+app.post(`${API}/import/csv/dry-run`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { month, rows } = req.body || {};
+
+    if (!month || !/^\d{4}-\d{2}$/.test(String(month))) {
+      return res.status(400).json({ error: "month must be YYYY-MM" });
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: "rows array required" });
+    }
+
+    const preview = [];
+    let invalid = 0;
+
+    for (const r of rows) {
+      const date = normalizeDateToIso(r.date || r.Date || r["Posting Date"] || r["Transaction Date"]);
+      const merchant = toStr(r.merchant || r.Description || r.description || r.Merchant || r.Payee || r.Name);
+      const account = toStr(r.account || r.Account) || "Chequing";
+      const amount = Number(r.amount ?? r.Amount ?? r.CAD ?? r.Value);
+
+      if (!date || !date.startsWith(month) || !Number.isFinite(amount) || !merchant) {
+        invalid++;
+        continue;
+      }
+
+      const category = await autoCategoryForMerchant(userId, merchant);
+      preview.push({ date, merchant, amount, account, category, note: toStr(r.note || r.Note) });
+      if (preview.length >= 50) break;
+    }
+
+    res.json({ ok: true, previewCount: preview.length, invalid, preview });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/import/csv`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { rows, source } = req.body || {};
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: "rows array required" });
+    }
+
+    const toInsert = [];
+    let skipped = 0;
+
+    for (const r of rows) {
+      const date = normalizeDateToIso(r.date || r.Date || r["Posting Date"] || r["Transaction Date"]);
+      const merchant = toStr(r.merchant || r.Description || r.description || r.Merchant || r.Payee || r.Name);
+      const account = toStr(r.account || r.Account) || "Chequing";
+      const note = toStr(r.note || r.Note);
+      const amount = Number(r.amount ?? r.Amount ?? r.CAD ?? r.Value);
+
+      if (!date || !merchant || !Number.isFinite(amount)) {
+        skipped++;
+        continue;
+      }
+
+      const category = await autoCategoryForMerchant(userId, merchant);
+      const importHash = makeImportHash(userId, date, merchant, amount, account);
+
+      toInsert.push({
+        userId,
+        date,
+        amount,
+        category,
+        merchant,
+        account,
+        note,
+        source: toStr(source) || "csv",
+        importHash,
+      });
+    }
+
+    if (toInsert.length === 0) {
+      return res.json({ inserted: 0, skipped });
+    }
+
+    // manual dedupe
+    const hashes = toInsert.map((r) => r.importHash);
+
+    const existing = await prisma.transaction.findMany({
+      where: { userId, importHash: { in: hashes } },
+      select: { importHash: true },
+    });
+
+    const existingSet = new Set(existing.map((x) => x.importHash));
+    const newRows = toInsert.filter((r) => !existingSet.has(r.importHash));
+
+    let inserted = 0;
+    if (newRows.length) {
+      const result = await prisma.transaction.createMany({ data: newRows });
+      inserted = Number(result?.count ?? 0);
+    }
+
+    const deduped = toInsert.length - newRows.length;
+    return res.json({ inserted, skipped: skipped + deduped });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ---------------------------
+   Transactions
+---------------------------- */
+app.get(`${API}/transactions`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const items = await prisma.transaction.findMany({
+      where: { userId },
+      orderBy: [{ date: "desc" }, { createdAt: "desc" }],
+    });
+    res.json({ transactions: items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/transactions`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { date, amount, category, merchant, account, note } = req.body || {};
+    if (!date || amount == null) return res.status(400).json({ error: "date and amount required" });
+
+    let finalCategory = String(category || "");
+    if (!finalCategory || finalCategory.toLowerCase() === "uncategorized") {
+      finalCategory = await autoCategoryForMerchant(userId, merchant);
+    }
+
+    const created = await prisma.transaction.create({
+      data: {
+        userId,
+        date: String(date),
+        amount: Number(amount),
+        category: finalCategory || "Uncategorized",
+        merchant: String(merchant || ""),
+        account: String(account || ""),
+        note: String(note || ""),
+        source: "manual",
+      },
+    });
+
+    res.json(created);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.put(`${API}/transactions/:id`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { id } = req.params;
+    const { date, amount, category, merchant, account, note } = req.body || {};
+
+    // if merchant changes and category is not explicitly set, re-auto-categorize
+    let nextCategory = category;
+    const catStr = category == null ? "" : String(category);
+    const shouldAuto = merchant != null && (!catStr || catStr.toLowerCase() === "uncategorized");
+
+    if (shouldAuto) {
+      nextCategory = await autoCategoryForMerchant(userId, merchant);
+    }
+
+    const updated = await prisma.transaction.updateMany({
+      where: { id, userId },
+      data: {
+        ...(date != null ? { date: String(date) } : {}),
+        ...(amount != null ? { amount: Number(amount) } : {}),
+        ...(nextCategory != null ? { category: String(nextCategory) } : {}),
+        ...(merchant != null ? { merchant: String(merchant) } : {}),
+        ...(account != null ? { account: String(account) } : {}),
+        ...(note != null ? { note: String(note) } : {}),
+      },
+    });
+
+    if (updated.count === 0) return res.status(404).json({ error: "Not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.delete(`${API}/transactions/:id`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { id } = req.params;
+
+    const deleted = await prisma.transaction.deleteMany({ where: { id, userId } });
+    if (deleted.count === 0) return res.status(404).json({ error: "Not found" });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ---------------------------
+   Budgets
+---------------------------- */
+app.get(`${API}/budgets`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+
+    // Optional: filter by month if provided
+    const month = req.query?.month ? String(req.query.month) : null;
+
+    const where = { userId, ...(month ? { month } : {}) };
+
+    const items = await prisma.budget.findMany({
+      where,
+      orderBy: [{ month: "desc" }, { category: "asc" }],
+    });
+
+    res.json({ budgets: items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Save a whole month’s budget (array of { category, amount })
+app.post(`${API}/budgets/save`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { month, items } = req.body || {};
+    if (!month || !Array.isArray(items)) return res.status(400).json({ error: "month and items required" });
+
+    await prisma.budget.deleteMany({ where: { userId, month: String(month) } });
+
+    if (items.length) {
+      await prisma.budget.createMany({
+        data: items.map((it) => ({
+          userId,
+          month: String(month),
+          category: String(it.category || ""),
+          amount: Number(it.amount || 0),
+        })),
+      });
+    }
+
+    const saved = await prisma.budget.findMany({ where: { userId, month: String(month) } });
+    res.json({ budgets: saved });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ---------------------------
+   Categories
+---------------------------- */
+app.get(`${API}/categories`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const items = await prisma.category.findMany({ where: { userId }, orderBy: { name: "asc" } });
+    res.json({ categories: items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/categories`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { name } = req.body || {};
+    if (!name) return res.status(400).json({ error: "name required" });
+
+    const created = await prisma.category.create({ data: { userId, name: String(name) } });
+    res.json(created);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.delete(`${API}/categories/:id`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { id } = req.params;
+
+    const deleted = await prisma.category.deleteMany({ where: { id, userId } });
+    if (deleted.count === 0) return res.status(404).json({ error: "Not found" });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ---------------------------
+   Rules
+---------------------------- */
+app.get(`${API}/rules`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const items = await prisma.rule.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
+    res.json({ rules: items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/rules`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { match, category } = req.body || {};
+    if (!match || !category) return res.status(400).json({ error: "match and category required" });
+
+    const created = await prisma.rule.create({
+      data: { userId, match: String(match).toLowerCase(), category: String(category) },
+    });
+
+    res.json(created);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.delete(`${API}/rules/:id`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { id } = req.params;
+
+    const deleted = await prisma.rule.deleteMany({ where: { id, userId } });
+    if (deleted.count === 0) return res.status(404).json({ error: "Not found" });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ---------------------------
+   Recurring (monthly only)
+---------------------------- */
+app.get(`${API}/recurring`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const items = await prisma.recurring.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
+    res.json({ recurring: items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/recurring`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { name, amount, category, merchant, account, note, dayOfMonth } = req.body || {};
+    if (!name || amount == null || !dayOfMonth) {
+      return res.status(400).json({ error: "name, amount, dayOfMonth required" });
+    }
+
+    const dom = Math.max(1, Math.min(28, Number(dayOfMonth)));
+
+    const created = await prisma.recurring.create({
+      data: {
+        userId,
+        name: String(name),
+        amount: Number(amount),
+        category: String(category || ""),
+        merchant: String(merchant || ""),
+        account: String(account || ""),
+        note: String(note || ""),
+        dayOfMonth: dom,
+        isActive: true,
+      },
+    });
+
+    res.json(created);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/recurring/:id/toggle`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { id } = req.params;
+
+    const r = await prisma.recurring.findFirst({ where: { id, userId } });
+    if (!r) return res.status(404).json({ error: "Not found" });
+
+    const updated = await prisma.recurring.update({ where: { id }, data: { isActive: !r.isActive } });
+    res.json(updated);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.delete(`${API}/recurring/:id`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { id } = req.params;
+
+    const deleted = await prisma.recurring.deleteMany({ where: { id, userId } });
+    if (deleted.count === 0) return res.status(404).json({ error: "Not found" });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Generate recurring transactions for a month (YYYY-MM)
+// UPDATED: manual dedupe (no skipDuplicates)
+app.post(`${API}/recurring/generate`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { month } = req.body || {};
+    if (!month || !/^\d{4}-\d{2}$/.test(String(month))) {
+      return res.status(400).json({ error: "month must be YYYY-MM" });
+    }
+
+    const items = await prisma.recurring.findMany({
       where: { userId, isActive: true },
     });
 
-    const recurringEvents = expandRecurring(recurring, startISO, endISO);
-
-    const allEvents = [...txEvents, ...recurringEvents];
-
-    const { timeline, lowestBalance, lowestDate } = buildTimeline({
-      startISO,
-      days,
-      openingBalance,
-      events: allEvents,
+    const rows = items.map((r) => {
+      const dd = String(Math.max(1, Math.min(28, r.dayOfMonth))).padStart(2, "0");
+      const date = `${month}-${dd}`;
+      const importHash = `recurring:${r.id}:${date}`;
+      return {
+        userId,
+        date,
+        amount: Number(r.amount),
+        category: r.category || "",
+        merchant: r.merchant || "",
+        account: r.account || "",
+        note: r.note || "",
+        source: "recurring",
+        recurringId: r.id,
+        importHash,
+      };
     });
 
-    const sum = summarize({ startISO, timeline });
+    if (!rows.length) return res.json({ ok: true, generated: 0 });
 
-    return res.json({
-      start: startISO,
-      end: endISO,
-      days,
-      openingBalance,
-      lowestBalance,
-      lowestDate,
-      summary: sum,
-      timeline,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Forecast failed" });
-  }
-});
+    const hashes = rows.map((r) => r.importHash);
 
-// --------------------
-// AI: Rule suggestion
-// --------------------
-app.get("/api/ai/suggest-rule", requireAuth, async (req, res) => {
-  try {
-    if (!openai) return res.status(501).json({ error: "OPENAI_API_KEY not set on server" });
-
-    const transactionId = String(req.query.transactionId || "").trim();
-    if (!transactionId) return res.status(400).json({ error: "transactionId is required" });
-
-    const tx = await prisma.transaction.findFirst({
-      where: { id: transactionId, userId: req.session.userId },
-    });
-    if (!tx) return res.status(404).json({ error: "Transaction not found" });
-
-    const categories = await prisma.category.findMany({
-      where: { userId: req.session.userId },
-      select: { name: true },
-      orderBy: { name: "asc" },
+    const existing = await prisma.transaction.findMany({
+      where: { userId, importHash: { in: hashes } },
+      select: { importHash: true },
     });
 
-    const prompt = {
-      role: "user",
-      content: [
-        "You are helping create auto-categorization rules for a budget app.",
-        "Given a transaction, propose a rule to categorize similar transactions.",
-        "Return JSON ONLY with keys: match, category, confidence, reasoning.",
-        "match should be a lowercase substring that is likely to appear in merchant/description.",
-        `Allowed categories: ${categories.map((c) => c.name).join(", ") || "None"}`,
-        `Transaction: merchant="${tx.merchant}", account="${tx.account}", amount=${tx.amount}, currentCategory="${tx.category}"`,
-      ].join("\n"),
-    };
+    const existingSet = new Set(existing.map((x) => x.importHash));
+    const newRows = rows.filter((r) => !existingSet.has(r.importHash));
 
-    const out = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [prompt],
-      temperature: 0.2,
-    });
-
-    const text = out.choices?.[0]?.message?.content || "{}";
-    let json = {};
-    try {
-      json = JSON.parse(text);
-    } catch {
-      json = { match: "", category: "", confidence: 0.0, reasoning: "Model did not return valid JSON." };
+    if (newRows.length) {
+      await prisma.transaction.createMany({ data: newRows });
     }
 
-    res.json(json);
-  } catch (err) {
-    console.error("GET /api/ai/suggest-rule failed:", err);
-    res.status(500).json({ error: "AI suggestion failed" });
+    res.json({ ok: true, generated: newRows.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// --------------------
-// API JSON 404 (prevents <!DOCTYPE html> errors)
-// --------------------
-app.use("/api", (req, res) => {
-  res.status(404).json({ error: `Not found: ${req.method} ${req.originalUrl}` });
+/* ---------------------------
+   Subscriptions / Bills
+---------------------------- */
+function normalizeMerchantKey(s) {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^a-z0-9 ]/g, "")
+    .slice(0, 80);
+}
+
+app.get(`${API}/subscriptions/candidates`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+
+    const lookbackDays = Math.max(30, Math.min(365, Number(req.query.days || 180)));
+    const fromIso = isoDate(addDays(new Date(), -lookbackDays));
+    const toIso = isoDate(new Date());
+
+    const tx = await prisma.transaction.findMany({
+      where: {
+        userId,
+        date: { gte: fromIso, lte: toIso },
+        merchant: { not: "" },
+      },
+      select: { date: true, amount: true, merchant: true, category: true, account: true },
+      orderBy: { date: "asc" },
+    });
+
+    const ignored = await prisma.subscriptionIgnore.findMany({
+      where: { userId },
+      select: { merchantKey: true },
+    });
+    const ignoredSet = new Set(ignored.map((x) => x.merchantKey));
+
+    const existing = await prisma.subscription.findMany({
+      where: { userId },
+      select: { merchantKey: true },
+    });
+    const existingSet = new Set(existing.map((x) => x.merchantKey));
+
+    const groups = new Map();
+    for (const t of tx) {
+      const key = normalizeMerchantKey(t.merchant);
+      if (!key) continue;
+      if (ignoredSet.has(key)) continue;
+      if (existingSet.has(key)) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(t);
+    }
+
+    function daysBetween(a, b) {
+      const da = parseIsoDate(a);
+      const db = parseIsoDate(b);
+      if (!da || !db) return 0;
+      return Math.round((db - da) / (1000 * 60 * 60 * 24));
+    }
+
+    function median(nums) {
+      const arr = nums.slice().sort((a, b) => a - b);
+      const mid = Math.floor(arr.length / 2);
+      return arr.length % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2;
+    }
+
+    function cadenceFromMedianGap(gap) {
+      if (!Number.isFinite(gap) || gap <= 0) return "unknown";
+      if (gap >= 5 && gap <= 10) return "weekly";
+      if (gap >= 20 && gap <= 45) return "monthly";
+      if (gap >= 70 && gap <= 110) return "quarterly";
+      if (gap >= 330 && gap <= 400) return "yearly";
+      return "unknown";
+    }
+
+    const candidates = [];
+
+    for (const [merchantKey, items] of groups.entries()) {
+      if (items.length < 2) continue;
+
+      const first = items[0];
+      const last = items[items.length - 1];
+      const spanDays = daysBetween(first.date, last.date);
+      if (spanDays < 20) continue;
+
+      const gaps = [];
+      for (let i = 1; i < items.length; i++) gaps.push(daysBetween(items[i - 1].date, items[i].date));
+      const medGap = median(gaps);
+      const cadence = cadenceFromMedianGap(medGap);
+
+      const amts = items.map((x) => Number(x.amount || 0)).filter((n) => Number.isFinite(n));
+      if (amts.length < 2) continue;
+      const expectedAmount = median(amts);
+
+      let confidence = 30;
+      if (items.length >= 3) confidence += 20;
+      if (cadence !== "unknown") confidence += 30;
+      if (Math.abs(expectedAmount) >= 5) confidence += 10;
+      confidence = Math.max(0, Math.min(100, confidence));
+
+      candidates.push({
+        merchantKey,
+        displayName: items[0].merchant,
+        cadence,
+        expectedAmount,
+        amountMin: Math.min(...amts),
+        amountMax: Math.max(...amts),
+        lastDate: last.date,
+        nextDate: null,
+        confidence,
+        kind: "subscription",
+        categoryId: null,
+        notes: null,
+      });
+    }
+
+    candidates.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+    res.json({ candidates });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
-// --------------------
-// Global error handler
-// --------------------
-app.use((err, _req, res, _next) => {
-  console.error("UNHANDLED ERROR:", err);
-  res.status(500).json({ error: "Server error" });
+app.get(`${API}/subscriptions`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const items = await prisma.subscription.findMany({
+      where: { userId },
+      orderBy: [{ isActive: "desc" }, { updatedAt: "desc" }],
+    });
+    res.json({ subscriptions: items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
-// --------------------
-// Start
-// --------------------
-const PORT = Number(process.env.PORT || 4000);
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`API running on port ${PORT}`);
-  console.log(`NODE_ENV: ${NODE_ENV}`);
-  console.log(`CLIENT_ORIGIN: ${CLIENT_ORIGIN || "(not set)"}`);
-  console.log(`DATABASE_URL: ${DATABASE_URL}`);
-  console.log(`SESSIONS_DB_PATH: ${SESSIONS_DB_PATH}`);
+app.post(`${API}/subscriptions`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+
+    const {
+      merchantKey,
+      displayName,
+      cadence = "unknown",
+      expectedAmount,
+      amountMin,
+      amountMax,
+      lastDate,
+      nextDate,
+      confidence = 0,
+      isActive = true,
+      kind = "subscription",
+      categoryId,
+      notes,
+    } = req.body || {};
+
+    const key = normalizeMerchantKey(merchantKey || displayName);
+    if (!key) return res.status(400).json({ error: "merchantKey or displayName required" });
+
+    const saved = await prisma.subscription.upsert({
+      where: { userId_merchantKey: { userId, merchantKey: key } },
+      update: {
+        displayName: String(displayName || key),
+        cadence: String(cadence || "unknown"),
+        expectedAmount: expectedAmount == null ? null : Number(expectedAmount),
+        amountMin: amountMin == null ? null : Number(amountMin),
+        amountMax: amountMax == null ? null : Number(amountMax),
+        lastDate: lastDate == null ? null : String(lastDate),
+        nextDate: nextDate == null ? null : String(nextDate),
+        confidence: Number(confidence || 0),
+        isActive: Boolean(isActive),
+        kind: String(kind || "subscription"),
+        categoryId: categoryId == null ? null : String(categoryId),
+        notes: notes == null ? null : String(notes),
+      },
+      create: {
+        userId,
+        merchantKey: key,
+        displayName: String(displayName || key),
+        cadence: String(cadence || "unknown"),
+        expectedAmount: expectedAmount == null ? null : Number(expectedAmount),
+        amountMin: amountMin == null ? null : Number(amountMin),
+        amountMax: amountMax == null ? null : Number(amountMax),
+        lastDate: lastDate == null ? null : String(lastDate),
+        nextDate: nextDate == null ? null : String(nextDate),
+        confidence: Number(confidence || 0),
+        isActive: Boolean(isActive),
+        kind: String(kind || "subscription"),
+        categoryId: categoryId == null ? null : String(categoryId),
+        notes: notes == null ? null : String(notes),
+      },
+    });
+
+    res.json(saved);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.patch(`${API}/subscriptions/:id`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { id } = req.params;
+    const patch = req.body || {};
+
+    const updated = await prisma.subscription.updateMany({
+      where: { id, userId },
+      data: {
+        ...(patch.displayName != null ? { displayName: String(patch.displayName) } : {}),
+        ...(patch.cadence != null ? { cadence: String(patch.cadence) } : {}),
+        ...(patch.expectedAmount !== undefined
+          ? { expectedAmount: patch.expectedAmount == null ? null : Number(patch.expectedAmount) }
+          : {}),
+        ...(patch.amountMin !== undefined ? { amountMin: patch.amountMin == null ? null : Number(patch.amountMin) } : {}),
+        ...(patch.amountMax !== undefined ? { amountMax: patch.amountMax == null ? null : Number(patch.amountMax) } : {}),
+        ...(patch.lastDate !== undefined ? { lastDate: patch.lastDate == null ? null : String(patch.lastDate) } : {}),
+        ...(patch.nextDate !== undefined ? { nextDate: patch.nextDate == null ? null : String(patch.nextDate) } : {}),
+        ...(patch.confidence != null ? { confidence: Number(patch.confidence) } : {}),
+        ...(patch.isActive != null ? { isActive: Boolean(patch.isActive) } : {}),
+        ...(patch.kind != null ? { kind: String(patch.kind) } : {}),
+        ...(patch.categoryId !== undefined ? { categoryId: patch.categoryId == null ? null : String(patch.categoryId) } : {}),
+        ...(patch.notes !== undefined ? { notes: patch.notes == null ? null : String(patch.notes) } : {}),
+      },
+    });
+
+    if (updated.count === 0) return res.status(404).json({ error: "Not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.delete(`${API}/subscriptions/:id`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { id } = req.params;
+
+    const deleted = await prisma.subscription.deleteMany({ where: { id, userId } });
+    if (deleted.count === 0) return res.status(404).json({ error: "Not found" });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post(`${API}/subscriptions/ignore`, requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const { merchantKey } = req.body || {};
+    const key = normalizeMerchantKey(merchantKey);
+    if (!key) return res.status(400).json({ error: "merchantKey required" });
+
+    await prisma.subscriptionIgnore.upsert({
+      where: { userId_merchantKey: { userId, merchantKey: key } },
+      update: {},
+      create: { userId, merchantKey: key },
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ---------------------------
+   AI (stub)
+---------------------------- */
+app.get(`${API}/ai/suggest-rule`, requireAuth, async (req, res) => {
+  const { transactionId } = req.query || {};
+  if (!transactionId) return res.status(400).json({ error: "transactionId required" });
+
+  res.json({
+    match: "amazon",
+    category: "Shopping",
+    confidence: 0.55,
+    reasoning: "Stub suggestion (AI route not implemented yet).",
+  });
+});
+
+/* ---------------------------
+   Start server
+---------------------------- */
+const PORT = process.env.PORT || 4000;
+
+app.listen(PORT, () => {
+  console.log(`✅ API running on http://localhost:${PORT}`);
+  console.log(`✅ CLIENT_ORIGIN = ${CLIENT_ORIGIN}`);
+
+  if (CLIENT_ORIGIN.includes('"') || CLIENT_ORIGIN.includes("\n")) {
+    console.warn("⚠️ Your CLIENT_ORIGIN env looks malformed. Use: CLIENT_ORIGIN=http://localhost:5173");
+  }
 });

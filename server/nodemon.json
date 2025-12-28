@@ -1,0 +1,15 @@
+{
+  "watch": ["index.js", "prisma"],
+  "ignore": [
+    "node_modules",
+    "*.db",
+    "*.db-shm",
+    "*.db-wal",
+    "sessions.db",
+    "sessions.db-shm",
+    "sessions.db-wal",
+    "dev.db",
+    "dev.db-shm",
+    "dev.db-wal"
+  ]
+}

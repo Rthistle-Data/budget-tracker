@@ -1,7 +1,7 @@
 // web/src/api.js
 // Single, consistent API layer using cookie sessions.
-// Dev: you can use Vite proxy with VITE_API_URL="" (or omit it) and proxy /api -> http://localhost:4000
-// Prod: set VITE_API_URL="https://budget-tracker-u8to.onrender.com" (your backend URL)
+// Dev: use Vite proxy with VITE_API_URL="" (or omit it) and proxy /api -> http://localhost:4000
+// Prod: set VITE_API_URL="https://your-backend.onrender.com" (your backend URL)
 
 const rawBase = (import.meta.env.VITE_API_URL || "").trim();
 const API_BASE = rawBase ? rawBase.replace(/\/+$/, "") : ""; // "" means relative (/api/...) for Vite proxy
@@ -18,7 +18,6 @@ async function apiFetch(path, options = {}) {
     ...options,
   });
 
-  // parse JSON if possible, otherwise surface text
   const text = await res.text();
   let data = {};
   try {
@@ -61,6 +60,8 @@ export const logout = () =>
     method: "POST",
   });
 
+// NOTE: These are currently NOT implemented on the server.
+// Keep them only if you plan to add routes later.
 export const forgotPassword = (email) =>
   apiFetch("/api/auth/forgot-password", {
     method: "POST",
@@ -77,6 +78,7 @@ export const resetPassword = (email, token, newPassword) =>
    Profile
 ---------------------------- */
 
+// NOTE: Not implemented on the server yet (unless you added it).
 export const changePassword = (currentPassword, newPassword) =>
   apiFetch("/api/profile/change-password", {
     method: "POST",
@@ -118,10 +120,22 @@ export const getBudgets = (month) => {
   return apiFetch(`/api/budgets?month=${encodeURIComponent(month)}`);
 };
 
+// ⚠️ Your server route in the rewritten backend is POST /api/budgets/save
+// If your UI still calls POST /api/budgets, either:
+//   A) change UI to call saveBudgetsMonth(), or
+//   B) add a POST /api/budgets route on the server.
+// For now, leaving your original behavior.
 export const saveBudget = ({ month, category, amount }) =>
   apiFetch("/api/budgets", {
     method: "POST",
     body: JSON.stringify({ month, category, amount }),
+  });
+
+// If you want to use the backend month-save endpoint:
+export const saveBudgetsMonth = ({ month, items }) =>
+  apiFetch("/api/budgets/save", {
+    method: "POST",
+    body: JSON.stringify({ month, items }),
   });
 
 /* ---------------------------
@@ -189,10 +203,10 @@ export const addRecurring = (payload) =>
     body: JSON.stringify(payload),
   });
 
-export const toggleRecurring = (id, isActive) =>
-  apiFetch(`/api/recurring/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    body: JSON.stringify({ isActive }),
+// ✅ Match server: POST /api/recurring/:id/toggle
+export const toggleRecurring = (id) =>
+  apiFetch(`/api/recurring/${encodeURIComponent(id)}/toggle`, {
+    method: "POST",
   });
 
 export const deleteRecurring = (id) =>
@@ -200,16 +214,19 @@ export const deleteRecurring = (id) =>
     method: "DELETE",
   });
 
+// ✅ Match server: POST /api/recurring/generate with JSON body { month }
 export const generateRecurring = (month) =>
-  apiFetch(`/api/recurring/generate?month=${encodeURIComponent(month)}`, {
+  apiFetch("/api/recurring/generate", {
     method: "POST",
+    body: JSON.stringify({ month }),
   });
 
 /* ---------------------------
    Subscriptions / Bills
 ---------------------------- */
 
-export const getSubscriptionCandidates = () => apiFetch("/api/subscriptions/candidates");
+export const getSubscriptionCandidates = (days = 180) =>
+  apiFetch(`/api/subscriptions/candidates?days=${encodeURIComponent(days)}`);
 
 export const getSubscriptions = () => apiFetch("/api/subscriptions");
 
@@ -246,6 +263,8 @@ export const importCsv = (rows, source = "csv") =>
     body: JSON.stringify({ rows, source }),
   });
 
+// NOTE: Your server dry-run currently ignores mapping. It accepts { month, rows }.
+// Keeping mapping in case your UI sends it, but server will just ignore extra fields.
 export const dryRunImport = ({ month, rows, mapping }) =>
   apiFetch("/api/import/csv/dry-run", {
     method: "POST",
@@ -263,13 +282,19 @@ export const getInsights = (month) => {
 };
 
 /* ---------------------------
-   Forecast
+   Settings + Forecast
 ---------------------------- */
 
-export async function getForecast(days = 30) {
-  const res = await fetch(`${API_BASE}/api/forecast?days=${encodeURIComponent(days)}`, {
-    credentials: "include",
+export const getSettings = () => apiFetch("/api/settings");
+
+export const setCurrentBalance = (currentBalance) =>
+  apiFetch("/api/settings/balance", {
+    method: "POST",
+    body: JSON.stringify({ currentBalance }),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+
+// ✅ Single forecast function (no duplicates)
+export const getForecast = (days = 60) =>
+  apiFetch(`/api/forecast?days=${encodeURIComponent(days)}`, {
+    method: "GET",
+  });

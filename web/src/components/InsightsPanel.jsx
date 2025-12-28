@@ -46,6 +46,13 @@ export default function InsightsPanel({ month, summary, transactions = [], budge
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // Helps prevent Recharts measuring -1/-1 on first paint in CSS grid/cards.
+  const [chartsReady, setChartsReady] = useState(false);
+  useEffect(() => {
+    let raf = requestAnimationFrame(() => setChartsReady(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
   useEffect(() => {
     let alive = true;
     setBusy(true);
@@ -104,9 +111,9 @@ export default function InsightsPanel({ month, summary, transactions = [], budge
   const overBudget = Array.isArray(data?.overBudget) ? data.overBudget : [];
 
   return (
-    <div style={{ display: "grid", gap: 12 }}>
+    <div style={{ display: "grid", gap: 12, minWidth: 0 }}>
       {/* KPIs */}
-      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(4, minmax(0, 1fr))", minWidth: 0 }}>
         <Kpi title="Income" value={money(totals.income)} />
         <Kpi title="Expenses" value={money(totals.expenses)} />
         <Kpi title="Net" value={money(totals.net)} />
@@ -118,57 +125,64 @@ export default function InsightsPanel({ month, summary, transactions = [], budge
       </div>
 
       {/* Charts */}
-      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1.2fr 1fr" }}>
-        <div className="card">
+      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1.2fr 1fr", minWidth: 0 }}>
+        <div className="card" style={{ minWidth: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
             <h3 style={{ margin: 0 }}>Spending by Category</h3>
             <div style={{ opacity: 0.7, fontSize: 13 }}>Top {topCats.length}</div>
           </div>
 
-          <div style={{ height: 320, marginTop: 8 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={topCats} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
-                <CartesianGrid vertical={false} opacity={0.2} />
-                <XAxis dataKey="name" tick={{ fontSize: 12 }} interval={0} angle={-15} textAnchor="end" height={60} />
-                <YAxis tick={{ fontSize: 12 }} />
-                <Tooltip formatter={(v) => money(v)} />
-                <Bar dataKey="spent" />
-              </BarChart>
-            </ResponsiveContainer>
+          <div style={{ height: 320, minHeight: 320, marginTop: 8, minWidth: 0 }}>
+            {chartsReady && topCats.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={topCats} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
+                  <CartesianGrid vertical={false} opacity={0.2} />
+                  <XAxis
+                    dataKey="name"
+                    tick={{ fontSize: 12 }}
+                    interval={0}
+                    angle={-15}
+                    textAnchor="end"
+                    height={60}
+                  />
+                  <YAxis tick={{ fontSize: 12 }} />
+                  <Tooltip formatter={(v) => money(v)} />
+                  <Bar dataKey="spent" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div style={{ opacity: 0.75, marginTop: 8 }}>No category spending data yet.</div>
+            )}
           </div>
-
-          {topCats.length === 0 && (
-            <div style={{ opacity: 0.75, marginTop: 8 }}>No category spending data yet.</div>
-          )}
         </div>
 
-        <div className="card">
+        <div className="card" style={{ minWidth: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
             <h3 style={{ margin: 0 }}>Daily Trend</h3>
             <div style={{ opacity: 0.7, fontSize: 13 }}>{month}</div>
           </div>
 
-          <div style={{ height: 320, marginTop: 8 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={dailySpend} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
-                <CartesianGrid opacity={0.2} />
-                <XAxis dataKey="date" tick={{ fontSize: 12 }} />
-                <YAxis tick={{ fontSize: 12 }} />
-                <Tooltip formatter={(v) => money(v)} labelFormatter={(l) => `Day ${l}`} />
-                <Line type="monotone" dataKey="expenses" dot={false} strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
+          <div style={{ height: 320, minHeight: 320, marginTop: 8, minWidth: 0 }}>
+            {chartsReady && dailySpend.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={dailySpend} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
+                  <CartesianGrid opacity={0.2} />
+                  <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+                  <YAxis tick={{ fontSize: 12 }} />
+                  <Tooltip formatter={(v) => money(v)} labelFormatter={(l) => `Day ${l}`} />
+                  <Line type="monotone" dataKey="expenses" dot={false} strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div style={{ opacity: 0.75, marginTop: 8 }}>No daily trend data yet.</div>
+            )}
           </div>
-
-          {dailySpend.length === 0 && (
-            <div style={{ opacity: 0.75, marginTop: 8 }}>No daily trend data yet.</div>
-          )}
         </div>
       </div>
 
       {/* Budget health + Alerts */}
-      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1.2fr 1fr" }}>
-        <div className="card">
+      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1.2fr 1fr", minWidth: 0 }}>
+        <div className="card" style={{ minWidth: 0 }}>
           <h3 style={{ margin: 0 }}>Budget Health</h3>
           <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
             {byCategory.slice(0, 12).map((c) => (
@@ -178,7 +192,7 @@ export default function InsightsPanel({ month, summary, transactions = [], budge
           </div>
         </div>
 
-        <div className="card">
+        <div className="card" style={{ minWidth: 0 }}>
           <h3 style={{ margin: 0 }}>Alerts</h3>
           <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
             {overBudget.length === 0 ? (
@@ -213,7 +227,7 @@ export default function InsightsPanel({ month, summary, transactions = [], budge
 
 function Kpi({ title, value, sub }) {
   return (
-    <div className="card" style={{ padding: 14 }}>
+    <div className="card" style={{ padding: 14, minWidth: 0 }}>
       <div style={{ opacity: 0.7, fontSize: 13 }}>{title}</div>
       <div style={{ fontSize: 22, fontWeight: 700, marginTop: 6 }}>{value}</div>
       {sub ? <div style={{ opacity: 0.7, fontSize: 13, marginTop: 6 }}>{sub}</div> : null}

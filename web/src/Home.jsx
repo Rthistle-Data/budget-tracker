@@ -1,7 +1,7 @@
 // web/src/Home.jsx
 import Papa from "papaparse";
-import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import "./styles.css";
 
 import PaywallModal from "./components/PaywallModal";
@@ -57,10 +57,15 @@ import {
 
   // AI helper
   suggestRule,
+
+  // settings + forecast
+  getSettings,
+  setCurrentBalance,
+  getForecast,
 } from "./api";
 
 /* ---------------------------
-   Helpers (safe response shapes)
+   Helpers
 ---------------------------- */
 
 function toArray(value, key) {
@@ -81,11 +86,326 @@ function money(n) {
 }
 
 function titleCaseFromKey(key) {
-  const s = String(key || "")
-    .replace(/\s+/g, " ")
-    .trim();
+  const s = String(key || "").replace(/\s+/g, " ").trim();
   if (!s) return "Unknown";
   return s.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
+
+/* ---------------------------
+   Simple SVG line chart (no deps)
+---------------------------- */
+
+function ForecastChart({ series, height = 180 }) {
+  const svgRef = useRef(null);
+  const [w, setW] = useState(600);
+
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+
+    function onResize() {
+      const rect = el.getBoundingClientRect();
+      setW(Math.max(260, Math.floor(rect.width)));
+    }
+
+    onResize();
+    const ro = new ResizeObserver(onResize);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const points = Array.isArray(series) ? series : [];
+  if (points.length < 2) {
+    return (
+      <div style={{ marginTop: 12, color: "var(--muted)" }}>
+        Not enough data to chart yet.
+      </div>
+    );
+  }
+
+  const balances = points.map((p) => Number(p.balance) || 0);
+  const minY = Math.min(...balances);
+  const maxY = Math.max(...balances);
+
+  const pad = (maxY - minY) * 0.08 || 50;
+  const y0 = minY - pad;
+  const y1 = maxY + pad;
+
+  const left = 8;
+  const right = 8;
+  const top = 10;
+  const bottom = 18;
+  const innerW = Math.max(1, w - left - right);
+  const innerH = Math.max(1, height - top - bottom);
+
+  const xFor = (i) => left + (i / (points.length - 1)) * innerW;
+  const yFor = (val) => {
+    const t = (val - y0) / (y1 - y0 || 1);
+    return top + (1 - clamp(t, 0, 1)) * innerH;
+  };
+
+  const d = points
+    .map((p, i) => {
+      const x = xFor(i);
+      const y = yFor(Number(p.balance) || 0);
+      return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+
+  const last = points[points.length - 1];
+  const lastX = xFor(points.length - 1);
+  const lastY = yFor(Number(last.balance) || 0);
+
+  return (
+    <div ref={svgRef} style={{ width: "100%" }}>
+      <svg width="100%" height={height} viewBox={`0 0 ${w} ${height}`}>
+        <line
+          x1={left}
+          y1={top + innerH}
+          x2={left + innerW}
+          y2={top + innerH}
+          stroke="rgba(255,255,255,0.08)"
+        />
+
+        <path d={d} fill="none" stroke="rgba(255,255,255,0.75)" strokeWidth="2.5" />
+        <circle cx={lastX} cy={lastY} r="4" fill="rgba(255,255,255,0.95)" />
+
+        <text x={left} y={height - 4} fontSize="11" fill="rgba(255,255,255,0.55)">
+          {points[0]?.date || ""}
+        </text>
+        <text
+          x={left + innerW}
+          y={height - 4}
+          fontSize="11"
+          textAnchor="end"
+          fill="rgba(255,255,255,0.55)"
+        >
+          {points[points.length - 1]?.date || ""}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+/* ---------------------------
+   Forecast Card (Dashboard premium widget)
+---------------------------- */
+
+function ForecastCard({ isPro, onOpenPaywall }) {
+  const [settings, setSettingsState] = useState(null);
+  const [balanceInput, setBalanceInput] = useState("");
+  const [days, setDays] = useState(60);
+  const [forecast, setForecastState] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const locked = !isPro;
+
+  async function load() {
+    setErr("");
+    setBusy(true);
+    try {
+      const s = await getSettings();
+      const currentBalance = s?.settings?.currentBalance ?? s?.currentBalance ?? 0;
+
+      setSettingsState(s?.settings ?? s);
+      setBalanceInput(String(currentBalance ?? 0));
+
+      const f = await getForecast(days);
+      setForecastState(f?.forecast ?? f);
+    } catch (e) {
+      setErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveBalance() {
+    setErr("");
+    const val = Number(balanceInput);
+    if (!Number.isFinite(val)) {
+      setErr("Enter a valid number for current balance.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await setCurrentBalance(val);
+      await load();
+    } catch (e) {
+      setErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [days]);
+
+  const series = useMemo(() => {
+    const s = forecast?.series || forecast?.points || forecast?.data || [];
+    return Array.isArray(s) ? s : [];
+  }, [forecast]);
+
+  const kpis = useMemo(() => {
+    if (!series.length) return null;
+
+    const lowest =
+      forecast?.lowest ||
+      series.reduce(
+        (best, r) => (Number(r.balance) < Number(best.balance) ? r : best),
+        series[0]
+      );
+
+    const end = series[series.length - 1];
+    const estDaily = Number(forecast?.estimatedDailyVariable);
+
+    return {
+      endBalance: Number(end?.balance) || 0,
+      endDate: end?.date || "",
+      lowestBalance: Number(lowest?.balance) || 0,
+      lowestDate: lowest?.date || "",
+      estimatedDailyVariable: Number.isFinite(estDaily) ? estDaily : null,
+    };
+  }, [forecast, series]);
+
+  return (
+    <div className="card cardPad" style={{ borderRadius: 16 }}>
+      <div className="row" style={{ alignItems: "center" }}>
+        <div>
+          <div className="brandTitle" style={{ fontSize: 16 }}>
+            Cash-Flow Forecast
+          </div>
+          <div className="brandSub">
+            Project your balance forward using recurring items + recent spending patterns.
+          </div>
+        </div>
+        <div className="spacer" />
+        <div className="row" style={{ gap: 8 }}>
+          <select
+            className="select"
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            style={{ width: 140 }}
+            disabled={busy}
+          >
+            <option value={30}>30 days</option>
+            <option value={60}>60 days</option>
+            <option value={90}>90 days</option>
+          </select>
+
+          <button className="btn" type="button" onClick={load} disabled={busy}>
+            {busy ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {locked && (
+        <div
+          className="card"
+          style={{
+            borderRadius: 14,
+            marginTop: 12,
+            background: "rgba(255,255,255,0.03)",
+            border: "1px solid rgba(255,255,255,0.06)",
+          }}
+        >
+          <div className="cardPad">
+            <div className="row" style={{ alignItems: "center" }}>
+              <div>
+                <div style={{ fontWeight: 900 }}>Forecast is a Pro feature</div>
+                <div className="brandSub" style={{ marginTop: 4 }}>
+                  Set your current balance, then see the lowest point ahead + projected runway.
+                </div>
+              </div>
+              <div className="spacer" />
+              <button className="btn btnPrimary" type="button" onClick={onOpenPaywall}>
+                Upgrade to Pro
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div
+        className="row"
+        style={{
+          marginTop: 12,
+          gap: 10,
+          alignItems: "end",
+          flexWrap: "wrap",
+          opacity: locked ? 0.55 : 1,
+          pointerEvents: locked ? "none" : "auto",
+        }}
+      >
+        <label className="field" style={{ width: 220 }}>
+          <div className="label">Current balance</div>
+          <input
+            className="input"
+            value={balanceInput}
+            onChange={(e) => setBalanceInput(e.target.value)}
+            inputMode="decimal"
+            placeholder="0.00"
+          />
+        </label>
+
+        <button className="btn btnPrimary" type="button" onClick={saveBalance} disabled={busy}>
+          Save balance
+        </button>
+      </div>
+
+      {err && (
+        <div className="noticeErr" style={{ marginTop: 10 }}>
+          {err}
+        </div>
+      )}
+
+      {!locked && (
+        <>
+          {kpis ? (
+            <div className="kpiGrid" style={{ marginTop: 14 }}>
+              <KPI label={`Projected end (${days}d)`} value={`$${money(kpis.endBalance)}`} />
+              <KPI label="Lowest point" value={`$${money(kpis.lowestBalance)}`} />
+              <KPI label="Lowest date" value={kpis.lowestDate || "-"} />
+              <KPI
+                label="Est. daily variable"
+                value={
+                  kpis.estimatedDailyVariable == null ? "-" : `$${money(kpis.estimatedDailyVariable)}`
+                }
+              />
+            </div>
+          ) : (
+            <div style={{ marginTop: 12, color: "var(--muted)" }}>
+              {busy ? "Loading forecast…" : "No forecast data yet."}
+            </div>
+          )}
+
+          {series.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <ForecastChart series={series} />
+              <div style={{ marginTop: 8, fontSize: 13, color: "var(--muted)" }}>
+                End date: <b>{kpis?.endDate || series[series.length - 1]?.date || "-"}</b>
+                {" · "}
+                Starting from your saved current balance.
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {!locked && settings && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)" }}>
+          Uses your recurring items + transaction history to estimate variable spending.
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ---------------------------
@@ -125,14 +445,8 @@ function CsvImportCard({ month, onImported }) {
     try {
       const text = await file.text();
 
-      const parsed = Papa.parse(text, {
-        header: true,
-        skipEmptyLines: true,
-      });
-
-      if (parsed.errors?.length) {
-        throw new Error(parsed.errors[0].message || "CSV parse error");
-      }
+      const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+      if (parsed.errors?.length) throw new Error(parsed.errors[0].message || "CSV parse error");
 
       const rowsRaw = parsed.data || [];
       if (!rowsRaw.length) throw new Error("No rows found in CSV.");
@@ -165,12 +479,10 @@ function CsvImportCard({ month, onImported }) {
       const toSend = filtered.length ? filtered : rows;
 
       const result = await importCsv(toSend, file.name);
-
       const inserted = Number(result?.inserted) || 0;
       const skipped = Number(result?.skipped) || 0;
 
       setMsg(`Imported: ${inserted} • Skipped: ${skipped}`);
-
       await onImported?.();
     } catch (e) {
       setMsg(e?.message || "Import failed");
@@ -228,26 +540,63 @@ function CsvImportCard({ month, onImported }) {
 ---------------------------- */
 
 export default function Home() {
-  // --------------------
   // Auth
-  // --------------------
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
 
-  // --------------------
   // Tabs
-  // --------------------
   const [topTab, setTopTab] = useState("dashboard"); // dashboard | tracker
   const [trackerTab, setTrackerTab] = useState("transactions"); // insights | transactions | budgets | categories | rules | recurring | subscriptions
 
-  // --------------------
+  // URL <-> tab sync (/app?tab=...)
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  const TRACKER_TABS = new Set([
+    "insights",
+    "transactions",
+    "budgets",
+    "categories",
+    "rules",
+    "recurring",
+    "subscriptions",
+  ]);
+
+  function setUrlTab(tab) {
+    const sp = new URLSearchParams(location.search);
+    if (tab) sp.set("tab", tab);
+    else sp.delete("tab");
+
+    const search = sp.toString();
+    navigate(
+      { pathname: location.pathname, search: search ? `?${search}` : "" },
+      { replace: true }
+    );
+  }
+
+  useEffect(() => {
+    const sp = new URLSearchParams(location.search);
+    const raw = sp.get("tab");
+    if (!raw) return;
+
+    const tab = String(raw).toLowerCase().trim();
+
+    if (TRACKER_TABS.has(tab)) {
+      setTopTab("tracker");
+      setTrackerTab(tab);
+      return;
+    }
+
+    if (tab === "dashboard" || tab === "forecast" || tab === "payday") {
+      setTopTab("dashboard");
+      return;
+    }
+  }, [location.search]);
+
   // Month
-  // --------------------
   const [month, setMonth] = useState(monthNow());
 
-  // --------------------
   // Paywall modal
-  // --------------------
   const [paywallOpen, setPaywallOpen] = useState(false);
   const isPro = user?.plan === "pro";
 
@@ -258,15 +607,13 @@ export default function Home() {
     setPaywallOpen(false);
   }
 
-  // TEMP: fake upgrade for testing (remove later when Stripe is hooked up)
+  // TEMP: fake upgrade for testing
   function fakeUpgradeToPro() {
     setUser((u) => ({ ...(u || {}), plan: "pro" }));
     setPaywallOpen(false);
   }
 
-  // --------------------
-  // Data state
-  // --------------------
+  // Data
   const [txns, setTxns] = useState([]);
   const [budgets, setBudgets] = useState([]);
   const [categoriesList, setCategoriesList] = useState([]);
@@ -299,9 +646,7 @@ export default function Home() {
     setEditOpen(true);
   }
 
-  // --------------------
   // AI Rule Builder modal
-  // --------------------
   const [aiOpen, setAiOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
@@ -331,7 +676,6 @@ export default function Home() {
     if (!aiSuggestion) return;
 
     await addRuleApi(aiSuggestion.match, aiSuggestion.category);
-
     const r = await getRules();
     setRules(toArray(r, "rules"));
 
@@ -340,9 +684,7 @@ export default function Home() {
     setAiTx(null);
   }
 
-  // --------------------
   // Auth: check session once
-  // --------------------
   useEffect(() => {
     (async () => {
       try {
@@ -356,9 +698,7 @@ export default function Home() {
     })();
   }, []);
 
-  // --------------------
-  // Load all data (defensive)
-  // --------------------
+  // Load all data
   async function loadAll() {
     setLoading(true);
     setErr("");
@@ -410,7 +750,7 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trackerTab, user]);
 
-  // Always safe arrays
+  // Safe arrays
   const safeTxns = Array.isArray(txns) ? txns : [];
   const safeBudgets = Array.isArray(budgets) ? budgets : [];
   const safeCategoriesList = Array.isArray(categoriesList) ? categoriesList : [];
@@ -419,9 +759,7 @@ export default function Home() {
   const safeSubCandidates = Array.isArray(subCandidates) ? subCandidates : [];
   const safeSubs = Array.isArray(subs) ? subs : [];
 
-  // --------------------
-  // Derived data
-  // --------------------
+  // Derived
   const summary = useMemo(() => {
     const income = safeTxns
       .filter((x) => Number(x.amount) > 0)
@@ -469,14 +807,17 @@ export default function Home() {
     });
   }, [categories, budgetMap, spentByCategory]);
 
-  // subscription KPIs
   const subsTotals = useMemo(() => {
     const active = safeSubs.filter((s) => s.isActive);
     const bills = active.filter((s) => (s.kind || "subscription") === "bill");
     const subsOnly = active.filter((s) => (s.kind || "subscription") !== "bill");
 
     const sum = (arr) =>
-      arr.reduce((a, s) => a + (Number(s.expectedAmount) || Number(s.amountMax) || Number(s.amountMin) || 0), 0);
+      arr.reduce(
+        (a, s) =>
+          a + (Number(s.expectedAmount) || Number(s.amountMax) || Number(s.amountMin) || 0),
+        0
+      );
 
     return {
       activeCount: active.length,
@@ -486,9 +827,7 @@ export default function Home() {
     };
   }, [safeSubs]);
 
-  // --------------------
   // Actions
-  // --------------------
   async function onAddTxn(e) {
     e.preventDefault();
     const amt = Number(amount);
@@ -621,9 +960,7 @@ export default function Home() {
     }
   }
 
-  // --------------------
   // Auth gating
-  // --------------------
   if (!authChecked) {
     return (
       <div className="container">
@@ -658,9 +995,6 @@ export default function Home() {
 
   const modalCategories = categories;
 
-  // --------------------
-  // Main UI
-  // --------------------
   return (
     <div className="container">
       <div className="shell">
@@ -678,7 +1012,6 @@ export default function Home() {
 
                 <div className="spacer" />
 
-                {/* Pro badge */}
                 <span
                   className="chip"
                   style={{
@@ -697,7 +1030,6 @@ export default function Home() {
                 </span>
               </div>
 
-              {/* Upgrade CTA */}
               {!isPro && (
                 <button
                   className="btn btnPrimary"
@@ -713,11 +1045,23 @@ export default function Home() {
 
           {/* Nav */}
           <div className="nav">
-            <NavItem active={topTab === "dashboard"} onClick={() => setTopTab("dashboard")}>
+            <NavItem
+              active={topTab === "dashboard"}
+              onClick={() => {
+                setTopTab("dashboard");
+                setUrlTab("dashboard");
+              }}
+            >
               Dashboard
             </NavItem>
 
-            <NavItem active={topTab === "tracker"} onClick={() => setTopTab("tracker")}>
+            <NavItem
+              active={topTab === "tracker"}
+              onClick={() => {
+                setTopTab("tracker");
+                setUrlTab(trackerTab || "transactions");
+              }}
+            >
               Budget Tracker
             </NavItem>
 
@@ -725,25 +1069,73 @@ export default function Home() {
               <div style={{ marginTop: 10 }}>
                 <div style={{ height: 8 }} />
 
-                <NavItem active={trackerTab === "insights"} onClick={() => setTrackerTab("insights")}>
+                <NavItem
+                  active={trackerTab === "insights"}
+                  onClick={() => {
+                    setTrackerTab("insights");
+                    setUrlTab("insights");
+                  }}
+                >
                   Insights
                 </NavItem>
-                <NavItem active={trackerTab === "transactions"} onClick={() => setTrackerTab("transactions")}>
+
+                <NavItem
+                  active={trackerTab === "transactions"}
+                  onClick={() => {
+                    setTrackerTab("transactions");
+                    setUrlTab("transactions");
+                  }}
+                >
                   Transactions
                 </NavItem>
-                <NavItem active={trackerTab === "budgets"} onClick={() => setTrackerTab("budgets")}>
+
+                <NavItem
+                  active={trackerTab === "budgets"}
+                  onClick={() => {
+                    setTrackerTab("budgets");
+                    setUrlTab("budgets");
+                  }}
+                >
                   Budgets
                 </NavItem>
-                <NavItem active={trackerTab === "categories"} onClick={() => setTrackerTab("categories")}>
+
+                <NavItem
+                  active={trackerTab === "categories"}
+                  onClick={() => {
+                    setTrackerTab("categories");
+                    setUrlTab("categories");
+                  }}
+                >
                   Categories
                 </NavItem>
-                <NavItem active={trackerTab === "rules"} onClick={() => setTrackerTab("rules")}>
+
+                <NavItem
+                  active={trackerTab === "rules"}
+                  onClick={() => {
+                    setTrackerTab("rules");
+                    setUrlTab("rules");
+                  }}
+                >
                   Rules
                 </NavItem>
-                <NavItem active={trackerTab === "recurring"} onClick={() => setTrackerTab("recurring")}>
+
+                <NavItem
+                  active={trackerTab === "recurring"}
+                  onClick={() => {
+                    setTrackerTab("recurring");
+                    setUrlTab("recurring");
+                  }}
+                >
                   Recurring
                 </NavItem>
-                <NavItem active={trackerTab === "subscriptions"} onClick={() => setTrackerTab("subscriptions")}>
+
+                <NavItem
+                  active={trackerTab === "subscriptions"}
+                  onClick={() => {
+                    setTrackerTab("subscriptions");
+                    setUrlTab("subscriptions");
+                  }}
+                >
                   Bills & Subs
                 </NavItem>
               </div>
@@ -793,7 +1185,6 @@ export default function Home() {
 
             <div className="spacer" />
 
-            {/* Month controls: tracker only */}
             {topTab === "tracker" && (
               <div className="row">
                 <label className="field" style={{ width: 160 }}>
@@ -826,7 +1217,15 @@ export default function Home() {
             {!loading && (
               <>
                 {topTab === "dashboard" ? (
-                  <Dashboard user={user} budgets={safeBudgets} transactions={safeTxns} onOpenPaywall={openPaywall} />
+                  <div style={{ display: "grid", gap: 14 }}>
+                    <ForecastCard isPro={isPro} onOpenPaywall={openPaywall} />
+                    <Dashboard
+                      user={user}
+                      budgets={safeBudgets}
+                      transactions={safeTxns}
+                      onOpenPaywall={openPaywall}
+                    />
+                  </div>
                 ) : trackerTab === "insights" ? (
                   <InsightsPanel month={month} summary={summary} transactions={safeTxns} budgets={safeBudgets} />
                 ) : trackerTab === "transactions" ? (
@@ -1059,7 +1458,6 @@ export default function Home() {
         </main>
       </div>
 
-      {/* Paywall modal rendered once at root */}
       <PaywallModal open={paywallOpen} onClose={closePaywall} onUpgrade={fakeUpgradeToPro} />
     </div>
   );
@@ -1138,7 +1536,6 @@ function SubscriptionsPanel({
       });
     }
 
-    // highest confidence first, then updated
     return list.slice().sort((a, b) => (Number(b.confidence) || 0) - (Number(a.confidence) || 0));
   }, [subscriptions, filter, q]);
 
@@ -1146,12 +1543,13 @@ function SubscriptionsPanel({
 
   return (
     <div style={{ display: "grid", gap: 14 }}>
-      {/* Pro gate card */}
       {locked && (
         <div className="card cardPad" style={{ borderRadius: 16 }}>
           <div className="row" style={{ alignItems: "center" }}>
             <div>
-              <div className="brandTitle" style={{ fontSize: 16 }}>Bills & Subscriptions (Pro)</div>
+              <div className="brandTitle" style={{ fontSize: 16 }}>
+                Bills & Subscriptions (Pro)
+              </div>
               <div className="brandSub">
                 Auto-detect recurring charges, track what’s active, and spot surprise increases.
               </div>
@@ -1167,7 +1565,6 @@ function SubscriptionsPanel({
         </div>
       )}
 
-      {/* KPIs */}
       <div className="kpiGrid">
         <KPI label="Active items" value={String(totals?.activeCount ?? 0)} />
         <KPI label="Subscriptions" value={String(totals?.subsCount ?? 0)} />
@@ -1175,12 +1572,15 @@ function SubscriptionsPanel({
         <KPI label="Est. monthly total" value={`$${money(totals?.estMonthly ?? 0)}`} />
       </div>
 
-      {/* Candidates */}
       <div className="card cardPad" style={{ borderRadius: 16 }}>
         <div className="row" style={{ alignItems: "center" }}>
           <div>
-            <div className="brandTitle" style={{ fontSize: 16 }}>Detected candidates</div>
-            <div className="brandSub">Based on your past transactions. Confirm what’s real, ignore the rest.</div>
+            <div className="brandTitle" style={{ fontSize: 16 }}>
+              Detected candidates
+            </div>
+            <div className="brandSub">
+              Based on your past transactions. Confirm what’s real, ignore the rest.
+            </div>
           </div>
           <div className="spacer" />
           <button className="btn" type="button" onClick={onRefresh} disabled={busy}>
@@ -1188,7 +1588,11 @@ function SubscriptionsPanel({
           </button>
         </div>
 
-        {msg && <div className="noticeErr" style={{ marginTop: 10 }}>{msg}</div>}
+        {msg && (
+          <div className="noticeErr" style={{ marginTop: 10 }}>
+            {msg}
+          </div>
+        )}
 
         {candidates.length === 0 ? (
           <div className="brandSub" style={{ marginTop: 12 }}>
@@ -1210,7 +1614,9 @@ function SubscriptionsPanel({
               <tbody>
                 {candidates.map((c) => (
                   <tr key={c.merchantKey}>
-                    <td style={{ fontWeight: 800 }}>{c.displayName || titleCaseFromKey(c.merchantKey)}</td>
+                    <td style={{ fontWeight: 800 }}>
+                      {c.displayName || titleCaseFromKey(c.merchantKey)}
+                    </td>
                     <td>{c.cadence || "unknown"}</td>
                     <td>${money(c.expectedAmount ?? 0)}</td>
                     <td>{c.lastDate || "-"}</td>
@@ -1243,12 +1649,15 @@ function SubscriptionsPanel({
         )}
       </div>
 
-      {/* Active list */}
       <div className="card cardPad" style={{ borderRadius: 16 }}>
         <div className="row" style={{ alignItems: "center" }}>
           <div>
-            <div className="brandTitle" style={{ fontSize: 16 }}>Your items</div>
-            <div className="brandSub">Toggle active, tag as Bill vs Subscription, delete anything wrong.</div>
+            <div className="brandTitle" style={{ fontSize: 16 }}>
+              Your items
+            </div>
+            <div className="brandSub">
+              Toggle active, tag as Bill vs Subscription, delete anything wrong.
+            </div>
           </div>
           <div className="spacer" />
           <select className="select" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ width: 180 }}>
@@ -1287,7 +1696,9 @@ function SubscriptionsPanel({
               <tbody>
                 {filtered.map((s) => (
                   <tr key={s.id}>
-                    <td style={{ fontWeight: 800 }}>{s.displayName || titleCaseFromKey(s.merchantKey)}</td>
+                    <td style={{ fontWeight: 800 }}>
+                      {s.displayName || titleCaseFromKey(s.merchantKey)}
+                    </td>
                     <td>
                       <select
                         className="select"
@@ -1402,7 +1813,7 @@ function AiRuleModal({ open, loading, error, suggestion, tx, onClose, onConfirm 
 }
 
 /* ---------------------------
-   Panels (same as yours)
+   Panels
 ---------------------------- */
 
 function BudgetsPanel({ month, rows, onSave }) {

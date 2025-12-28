@@ -10,7 +10,7 @@ datasource db {
 
 model Transaction {
   id        String   @id @default(cuid())
-  date      String   // YYYY-MM-DD
+  date      String // YYYY-MM-DD
   amount    Float
   category  String
   merchant  String
@@ -29,11 +29,10 @@ model Transaction {
 
   // auth scoping
   userId String?
-  user   User? @relation(fields: [userId], references: [id])
+  user   User?   @relation(fields: [userId], references: [id])
 
   // allow multiple nulls, but prevent duplicates when importHash is set
   @@unique([userId, importHash])
-
   // Helpful query performance
   @@index([userId, date])
   @@index([userId, category])
@@ -48,7 +47,7 @@ model Budget {
   amount   Float
 
   userId String?
-  user   User? @relation(fields: [userId], references: [id])
+  user   User?   @relation(fields: [userId], references: [id])
 
   @@unique([userId, month, category])
   @@index([userId, month])
@@ -60,7 +59,7 @@ model Category {
   createdAt DateTime @default(now())
 
   userId String?
-  user   User? @relation(fields: [userId], references: [id])
+  user   User?   @relation(fields: [userId], references: [id])
 
   @@unique([userId, name])
   @@index([userId])
@@ -68,12 +67,12 @@ model Category {
 
 model Rule {
   id        String   @id @default(cuid())
-  match     String   // substring to look for (store lowercase)
-  category  String   // category to assign
+  match     String // substring to look for (store lowercase)
+  category  String // category to assign
   createdAt DateTime @default(now())
 
   userId String?
-  user   User? @relation(fields: [userId], references: [id])
+  user   User?   @relation(fields: [userId], references: [id])
 
   @@index([userId])
   @@index([userId, createdAt])
@@ -87,12 +86,12 @@ model Recurring {
   merchant   String
   account    String
   note       String   @default("")
-  dayOfMonth Int      // 1..28
+  dayOfMonth Int // 1..28
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
 
   userId String?
-  user   User? @relation(fields: [userId], references: [id])
+  user   User?   @relation(fields: [userId], references: [id])
 
   // Back relation (paired with Transaction.recurringId)
   transactions Transaction[]
@@ -102,11 +101,12 @@ model Recurring {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
+  id           String        @id @default(cuid())
+  email        String        @unique
   passwordHash String
-  createdAt    DateTime @default(now())
-
+  createdAt    DateTime      @default(now())
+  settings     UserSettings?
+  startingBalance Float    @default(0)
   passwordResetTokens PasswordResetToken[]
 
   transactions Transaction[]
@@ -121,12 +121,12 @@ model User {
 }
 
 model PasswordResetToken {
-  id        String   @id @default(cuid())
-  tokenHash String   @unique
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
   userId    String
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -137,14 +137,14 @@ model PasswordResetToken {
 model Subscription {
   id             String   @id @default(uuid())
   userId         String
-  merchantKey    String   // normalized merchant identifier
-  displayName    String   // user-friendly name
-  cadence        String   // weekly | monthly | quarterly | yearly | unknown
+  merchantKey    String // normalized merchant identifier
+  displayName    String // user-friendly name
+  cadence        String // weekly | monthly | quarterly | yearly | unknown
   expectedAmount Float?
   amountMin      Float?
   amountMax      Float?
-  lastDate       String?  // YYYY-MM-DD
-  nextDate       String?  // YYYY-MM-DD
+  lastDate       String? // YYYY-MM-DD
+  nextDate       String? // YYYY-MM-DD
   confidence     Int      @default(0) // 0-100
   isActive       Boolean  @default(true)
   kind           String   @default("subscription") // subscription | bill
@@ -158,7 +158,6 @@ model Subscription {
 
   // IMPORTANT: required for upsert by (userId, merchantKey)
   @@unique([userId, merchantKey])
-
   @@index([userId])
   @@index([userId, isActive])
   @@index([userId, nextDate])
@@ -175,4 +174,13 @@ model SubscriptionIgnore {
 
   @@unique([userId, merchantKey])
   @@index([userId])
+}
+
+model UserSettings {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  currentBalance Float    @default(0)
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

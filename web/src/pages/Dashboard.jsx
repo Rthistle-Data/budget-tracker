@@ -1,5 +1,6 @@
 // web/src/pages/Dashboard.jsx
 import React, { useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import ProLock from "../components/ProLock";
 import "./dashboard.css";
 
@@ -68,13 +69,27 @@ function PaydayPreview() {
   );
 }
 
-export default function Dashboard({ user, budgets = [], transactions = [], onOpenPaywall }) {
+export default function Dashboard({
+  user,
+  budgets = [],
+  transactions = [],
+  onOpenPaywall,
+}) {
+  const navigate = useNavigate();
+
   // plan may not exist yet; default to free
   const isPro = (user?.plan || "free") === "pro";
 
+  function goToAppTab(tab) {
+    navigate(`/app?tab=${encodeURIComponent(tab)}`);
+  }
+
   const openPaywall = () => {
-    if (typeof onOpenPaywall === "function") onOpenPaywall();
-    else alert("TODO: open paywall / pricing page");
+    if (typeof onOpenPaywall === "function") return onOpenPaywall();
+
+    // If you have a pricing page route, use it:
+    // navigate("/pricing");
+    alert("TODO: open paywall / pricing page");
   };
 
   // Totals for the month
@@ -139,7 +154,6 @@ export default function Dashboard({ user, budgets = [], transactions = [], onOpe
   }, [budgets, spentByCategory]);
 
   const recentTx = useMemo(() => {
-    // assumes API returns newest first; if not, sort by date desc
     const arr = Array.isArray(transactions) ? transactions : [];
     return arr.slice(0, 8);
   }, [transactions]);
@@ -176,7 +190,11 @@ export default function Dashboard({ user, budgets = [], transactions = [], onOpe
             <div className="real">
               <div className="real__big">Safe to spend today: $42</div>
               <div className="real__muted">Risk date: Jan 6</div>
-              <button className="btn" type="button" onClick={() => alert("Simulate fix")}>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => goToAppTab("forecast")}
+              >
                 Simulate a fix
               </button>
             </div>
@@ -196,7 +214,11 @@ export default function Dashboard({ user, budgets = [], transactions = [], onOpe
             <div className="real">
               <div className="real__big">Stress: 58 / 100</div>
               <div className="real__muted">Top driver: fixed expenses</div>
-              <button className="btn" type="button" onClick={() => alert("Show actions")}>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => goToAppTab("insights")}
+              >
                 Show actions
               </button>
             </div>
@@ -218,18 +240,27 @@ export default function Dashboard({ user, budgets = [], transactions = [], onOpe
                       <div className="budgetRow__name">{r.category}</div>
                       <div className="budgetRow__nums">
                         {fmtMoney(r.spent)} / {fmtMoney(r.budgeted)}
-                        {over ? <span style={{ marginLeft: 8 }} title="Over budget">⚠️</span> : null}
+                        {over ? (
+                          <span style={{ marginLeft: 8 }} title="Over budget">
+                            ⚠️
+                          </span>
+                        ) : null}
                       </div>
                     </div>
 
                     <div className="budgetRow__bar">
-                      <div className="budgetRow__fill" style={{ width: `${Math.min(120, Math.max(0, pct))}%` }} />
+                      <div
+                        className="budgetRow__fill"
+                        style={{ width: `${Math.min(120, Math.max(0, pct))}%` }}
+                      />
                     </div>
 
                     <div className="budgetRow__sub">
                       {r.budgeted > 0 ? (
                         <span>
-                          {over ? `${fmtMoney(Math.abs(r.remaining))} over` : `${fmtMoney(r.remaining)} left`}
+                          {over
+                            ? `${fmtMoney(Math.abs(r.remaining))} over`
+                            : `${fmtMoney(r.remaining)} left`}
                         </span>
                       ) : (
                         <span>No budget set</span>
@@ -255,7 +286,11 @@ export default function Dashboard({ user, budgets = [], transactions = [], onOpe
             <div className="real">
               <div className="real__big">Leaks found: $27.98/mo</div>
               <div className="real__muted">2 unused subscriptions detected</div>
-              <button className="btn" type="button" onClick={() => alert("Review subscriptions")}>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => goToAppTab("subscriptions")}
+              >
                 Review subscriptions
               </button>
             </div>
@@ -269,7 +304,10 @@ export default function Dashboard({ user, budgets = [], transactions = [], onOpe
           ) : (
             <div className="txlist">
               {recentTx.map((t) => (
-                <div key={t.id || `${t.date}-${t.merchant}-${t.amount}`} className="tx">
+                <div
+                  key={t.id || `${t.date}-${t.merchant}-${t.amount}`}
+                  className="tx"
+                >
                   <div className="tx__left">
                     <div className="tx__desc">{t.merchant || "Transaction"}</div>
                     <div className="tx__sub">
@@ -283,8 +321,12 @@ export default function Dashboard({ user, budgets = [], transactions = [], onOpe
           )}
 
           <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <div className="chip">Income: <b style={{ marginLeft: 6 }}>{fmtMoney(totals.income)}</b></div>
-            <div className="chip">Spend: <b style={{ marginLeft: 6 }}>{fmtMoney(-totals.spend)}</b></div>
+            <div className="chip">
+              Income: <b style={{ marginLeft: 6 }}>{fmtMoney(totals.income)}</b>
+            </div>
+            <div className="chip">
+              Spend: <b style={{ marginLeft: 6 }}>{fmtMoney(-totals.spend)}</b>
+            </div>
           </div>
         </Card>
 
@@ -301,7 +343,11 @@ export default function Dashboard({ user, budgets = [], transactions = [], onOpe
             <div className="real">
               <div className="real__big">Allocation plan ready</div>
               <div className="real__muted">Run once per paycheque</div>
-              <button className="btn" type="button" onClick={() => alert("Run payday mode")}>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => goToAppTab("payday")}
+              >
                 Run Payday Mode
               </button>
             </div>
