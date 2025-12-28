@@ -40,6 +40,14 @@ import {
   deleteRecurring,
   generateRecurring,
 
+  // subs / bills
+  getSubscriptionCandidates,
+  getSubscriptions,
+  saveSubscription,
+  ignoreSubscriptionCandidate,
+  updateSubscription,
+  deleteSubscription,
+
   // CSV import
   importCsv,
 
@@ -67,14 +75,17 @@ function monthNow() {
   return `${d.getFullYear()}-${mm}`;
 }
 
-function isoDateForMonthDay(month, day) {
-  const dd = String(day).padStart(2, "0");
-  return `${month}-${dd}`;
-}
-
 function money(n) {
   const x = Number(n) || 0;
   return x.toFixed(2);
+}
+
+function titleCaseFromKey(key) {
+  const s = String(key || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return "Unknown";
+  return s.replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /* ---------------------------
@@ -227,7 +238,7 @@ export default function Home() {
   // Tabs
   // --------------------
   const [topTab, setTopTab] = useState("dashboard"); // dashboard | tracker
-  const [trackerTab, setTrackerTab] = useState("transactions"); // insights | transactions | budgets | categories | rules | recurring
+  const [trackerTab, setTrackerTab] = useState("transactions"); // insights | transactions | budgets | categories | rules | recurring | subscriptions
 
   // --------------------
   // Month
@@ -261,6 +272,12 @@ export default function Home() {
   const [categoriesList, setCategoriesList] = useState([]);
   const [rules, setRules] = useState([]);
   const [recurring, setRecurring] = useState([]);
+
+  // subscriptions
+  const [subCandidates, setSubCandidates] = useState([]);
+  const [subs, setSubs] = useState([]);
+  const [subsBusy, setSubsBusy] = useState(false);
+  const [subsMsg, setSubsMsg] = useState("");
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -367,11 +384,31 @@ export default function Home() {
     }
   }
 
+  async function loadSubs() {
+    setSubsBusy(true);
+    setSubsMsg("");
+    try {
+      const [cand, list] = await Promise.all([getSubscriptionCandidates(), getSubscriptions()]);
+      setSubCandidates(toArray(cand, "candidates"));
+      setSubs(toArray(list, "subscriptions"));
+    } catch (e) {
+      setSubsMsg(String(e?.message || e));
+    } finally {
+      setSubsBusy(false);
+    }
+  }
+
   useEffect(() => {
     setDate(`${month}-01`);
     if (user) loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month, user]);
+
+  useEffect(() => {
+    if (!user) return;
+    if (trackerTab === "subscriptions") loadSubs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackerTab, user]);
 
   // Always safe arrays
   const safeTxns = Array.isArray(txns) ? txns : [];
@@ -379,6 +416,8 @@ export default function Home() {
   const safeCategoriesList = Array.isArray(categoriesList) ? categoriesList : [];
   const safeRules = Array.isArray(rules) ? rules : [];
   const safeRecurring = Array.isArray(recurring) ? recurring : [];
+  const safeSubCandidates = Array.isArray(subCandidates) ? subCandidates : [];
+  const safeSubs = Array.isArray(subs) ? subs : [];
 
   // --------------------
   // Derived data
@@ -430,11 +469,22 @@ export default function Home() {
     });
   }, [categories, budgetMap, spentByCategory]);
 
-  // ✅ Exact matching using recurringId (kept)
-  useMemo(() => {
-    // you can keep this if you use it later for dashboard widgets
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [safeRecurring, safeTxns, month]);
+  // subscription KPIs
+  const subsTotals = useMemo(() => {
+    const active = safeSubs.filter((s) => s.isActive);
+    const bills = active.filter((s) => (s.kind || "subscription") === "bill");
+    const subsOnly = active.filter((s) => (s.kind || "subscription") !== "bill");
+
+    const sum = (arr) =>
+      arr.reduce((a, s) => a + (Number(s.expectedAmount) || Number(s.amountMax) || Number(s.amountMin) || 0), 0);
+
+    return {
+      activeCount: active.length,
+      subsCount: subsOnly.length,
+      billsCount: bills.length,
+      estMonthly: sum(active),
+    };
+  }, [safeSubs]);
 
   // --------------------
   // Actions
@@ -503,6 +553,71 @@ export default function Home() {
     } catch (e) {
       setTxns(snapshot);
       alert(e?.message || "Delete failed");
+    }
+  }
+
+  // Subs actions
+  async function onConfirmCandidate(c) {
+    setSubsBusy(true);
+    setSubsMsg("");
+    try {
+      await saveSubscription({
+        merchantKey: c.merchantKey,
+        displayName: c.displayName || titleCaseFromKey(c.merchantKey),
+        cadence: c.cadence || "monthly",
+        expectedAmount: c.expectedAmount ?? null,
+        lastDate: c.lastDate ?? null,
+        nextDate: c.nextDate ?? null,
+        confidence: c.confidence ?? 0,
+        isActive: true,
+        kind: "subscription",
+      });
+      await loadSubs();
+    } catch (e) {
+      setSubsMsg(String(e?.message || e));
+    } finally {
+      setSubsBusy(false);
+    }
+  }
+
+  async function onIgnoreCandidate(c) {
+    setSubsBusy(true);
+    setSubsMsg("");
+    try {
+      await ignoreSubscriptionCandidate(c.merchantKey);
+      await loadSubs();
+    } catch (e) {
+      setSubsMsg(String(e?.message || e));
+    } finally {
+      setSubsBusy(false);
+    }
+  }
+
+  async function onToggleSubActive(id, isActive) {
+    setSubsBusy(true);
+    setSubsMsg("");
+    try {
+      await updateSubscription(id, { isActive });
+      await loadSubs();
+    } catch (e) {
+      setSubsMsg(String(e?.message || e));
+    } finally {
+      setSubsBusy(false);
+    }
+  }
+
+  async function onDeleteSub(id) {
+    const ok = confirm("Delete this subscription/bill?");
+    if (!ok) return;
+    setSubsBusy(true);
+    setSubsMsg("");
+    try {
+      await deleteSubscription(id);
+      await loadSubs();
+    } catch (e) {
+      setSubsMsg(String(e?.message || e));
+    } finally {
+      setSubsBusy(false);
     }
   }
 
@@ -628,6 +743,9 @@ export default function Home() {
                 <NavItem active={trackerTab === "recurring"} onClick={() => setTrackerTab("recurring")}>
                   Recurring
                 </NavItem>
+                <NavItem active={trackerTab === "subscriptions"} onClick={() => setTrackerTab("subscriptions")}>
+                  Bills & Subs
+                </NavItem>
               </div>
             )}
 
@@ -665,7 +783,11 @@ export default function Home() {
                 {topTab === "dashboard" ? "Dashboard" : tabLabel(trackerTab)}
               </div>
               <div className="brandSub">
-                {topTab === "dashboard" ? "Premium overview + Pro features" : "Month view + categorized spending"}
+                {topTab === "dashboard"
+                  ? "Premium overview + Pro features"
+                  : trackerTab === "subscriptions"
+                  ? "Detect recurring charges and manage bills/subscriptions"
+                  : "Month view + categorized spending"}
               </div>
             </div>
 
@@ -679,7 +801,14 @@ export default function Home() {
                   <input className="input" value={month} onChange={(e) => setMonth(e.target.value)} />
                 </label>
 
-                <button className="btn" onClick={loadAll} type="button">
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    await loadAll();
+                    if (trackerTab === "subscriptions") await loadSubs();
+                  }}
+                  type="button"
+                >
                   Refresh
                 </button>
               </div>
@@ -870,6 +999,33 @@ export default function Home() {
                       setRules(toArray(r, "rules"));
                     }}
                   />
+                ) : trackerTab === "subscriptions" ? (
+                  <SubscriptionsPanel
+                    isPro={isPro}
+                    onOpenPaywall={openPaywall}
+                    busy={subsBusy}
+                    msg={subsMsg}
+                    totals={subsTotals}
+                    candidates={safeSubCandidates}
+                    subscriptions={safeSubs}
+                    onRefresh={loadSubs}
+                    onConfirmCandidate={onConfirmCandidate}
+                    onIgnoreCandidate={onIgnoreCandidate}
+                    onToggleActive={onToggleSubActive}
+                    onDelete={onDeleteSub}
+                    onSetKind={async (id, kind) => {
+                      setSubsBusy(true);
+                      setSubsMsg("");
+                      try {
+                        await updateSubscription(id, { kind });
+                        await loadSubs();
+                      } catch (e) {
+                        setSubsMsg(String(e?.message || e));
+                      } finally {
+                        setSubsBusy(false);
+                      }
+                    }}
+                  />
                 ) : (
                   <RecurringPanel
                     month={month}
@@ -919,7 +1075,8 @@ function tabLabel(tab) {
   if (tab === "budgets") return "Budgets";
   if (tab === "categories") return "Categories";
   if (tab === "rules") return "Rules";
-  return "Recurring";
+  if (tab === "recurring") return "Recurring";
+  return "Bills & Subs";
 }
 
 function NavItem({ active, children, onClick }) {
@@ -945,11 +1102,256 @@ function KPI({ label, value }) {
 }
 
 /* ---------------------------
+   Bills & Subs Panel
+---------------------------- */
+
+function SubscriptionsPanel({
+  isPro,
+  onOpenPaywall,
+  busy,
+  msg,
+  totals,
+  candidates,
+  subscriptions,
+  onRefresh,
+  onConfirmCandidate,
+  onIgnoreCandidate,
+  onToggleActive,
+  onDelete,
+  onSetKind,
+}) {
+  const [filter, setFilter] = useState("active"); // active | all | subs | bills
+  const [q, setQ] = useState("");
+
+  const filtered = useMemo(() => {
+    const text = q.trim().toLowerCase();
+    let list = Array.isArray(subscriptions) ? subscriptions : [];
+
+    if (filter === "active") list = list.filter((s) => s.isActive);
+    if (filter === "subs") list = list.filter((s) => (s.kind || "subscription") === "subscription");
+    if (filter === "bills") list = list.filter((s) => (s.kind || "subscription") === "bill");
+
+    if (text) {
+      list = list.filter((s) => {
+        const hay = `${s.displayName || ""} ${s.merchantKey || ""}`.toLowerCase();
+        return hay.includes(text);
+      });
+    }
+
+    // highest confidence first, then updated
+    return list.slice().sort((a, b) => (Number(b.confidence) || 0) - (Number(a.confidence) || 0));
+  }, [subscriptions, filter, q]);
+
+  const locked = !isPro;
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      {/* Pro gate card */}
+      {locked && (
+        <div className="card cardPad" style={{ borderRadius: 16 }}>
+          <div className="row" style={{ alignItems: "center" }}>
+            <div>
+              <div className="brandTitle" style={{ fontSize: 16 }}>Bills & Subscriptions (Pro)</div>
+              <div className="brandSub">
+                Auto-detect recurring charges, track what’s active, and spot surprise increases.
+              </div>
+            </div>
+            <div className="spacer" />
+            <button className="btn btnPrimary" type="button" onClick={onOpenPaywall}>
+              Upgrade to Pro
+            </button>
+          </div>
+          <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13 }}>
+            You can still view the tab, but confirming candidates + managing items requires Pro.
+          </div>
+        </div>
+      )}
+
+      {/* KPIs */}
+      <div className="kpiGrid">
+        <KPI label="Active items" value={String(totals?.activeCount ?? 0)} />
+        <KPI label="Subscriptions" value={String(totals?.subsCount ?? 0)} />
+        <KPI label="Bills" value={String(totals?.billsCount ?? 0)} />
+        <KPI label="Est. monthly total" value={`$${money(totals?.estMonthly ?? 0)}`} />
+      </div>
+
+      {/* Candidates */}
+      <div className="card cardPad" style={{ borderRadius: 16 }}>
+        <div className="row" style={{ alignItems: "center" }}>
+          <div>
+            <div className="brandTitle" style={{ fontSize: 16 }}>Detected candidates</div>
+            <div className="brandSub">Based on your past transactions. Confirm what’s real, ignore the rest.</div>
+          </div>
+          <div className="spacer" />
+          <button className="btn" type="button" onClick={onRefresh} disabled={busy}>
+            {busy ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+
+        {msg && <div className="noticeErr" style={{ marginTop: 10 }}>{msg}</div>}
+
+        {candidates.length === 0 ? (
+          <div className="brandSub" style={{ marginTop: 12 }}>
+            No candidates yet. Import more CSV history or add more transactions.
+          </div>
+        ) : (
+          <div style={{ marginTop: 12, overflowX: "auto" }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Cadence</th>
+                  <th>Expected</th>
+                  <th>Last</th>
+                  <th>Confidence</th>
+                  <th style={{ width: 220 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {candidates.map((c) => (
+                  <tr key={c.merchantKey}>
+                    <td style={{ fontWeight: 800 }}>{c.displayName || titleCaseFromKey(c.merchantKey)}</td>
+                    <td>{c.cadence || "unknown"}</td>
+                    <td>${money(c.expectedAmount ?? 0)}</td>
+                    <td>{c.lastDate || "-"}</td>
+                    <td>{Math.round(Number(c.confidence) || 0)}%</td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button
+                        className="btn btnPrimary"
+                        type="button"
+                        disabled={busy || locked}
+                        onClick={() => onConfirmCandidate(c)}
+                        title={locked ? "Upgrade to Pro to confirm" : ""}
+                      >
+                        Confirm
+                      </button>{" "}
+                      <button
+                        className="btn"
+                        type="button"
+                        disabled={busy || locked}
+                        onClick={() => onIgnoreCandidate(c)}
+                        title={locked ? "Upgrade to Pro to ignore" : ""}
+                      >
+                        Ignore
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Active list */}
+      <div className="card cardPad" style={{ borderRadius: 16 }}>
+        <div className="row" style={{ alignItems: "center" }}>
+          <div>
+            <div className="brandTitle" style={{ fontSize: 16 }}>Your items</div>
+            <div className="brandSub">Toggle active, tag as Bill vs Subscription, delete anything wrong.</div>
+          </div>
+          <div className="spacer" />
+          <select className="select" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ width: 180 }}>
+            <option value="active">Active</option>
+            <option value="all">All</option>
+            <option value="subs">Subscriptions</option>
+            <option value="bills">Bills</option>
+          </select>
+          <input
+            className="input"
+            placeholder="Search…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            style={{ width: 220 }}
+          />
+        </div>
+
+        {filtered.length === 0 ? (
+          <div className="brandSub" style={{ marginTop: 12 }}>
+            Nothing to show yet.
+          </div>
+        ) : (
+          <div style={{ marginTop: 12, overflowX: "auto" }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Cadence</th>
+                  <th>Expected</th>
+                  <th>Next</th>
+                  <th>Active</th>
+                  <th style={{ width: 160 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((s) => (
+                  <tr key={s.id}>
+                    <td style={{ fontWeight: 800 }}>{s.displayName || titleCaseFromKey(s.merchantKey)}</td>
+                    <td>
+                      <select
+                        className="select"
+                        value={s.kind || "subscription"}
+                        onChange={(e) => onSetKind(s.id, e.target.value)}
+                        disabled={busy || locked}
+                        title={locked ? "Upgrade to Pro to edit" : ""}
+                        style={{ width: 150 }}
+                      >
+                        <option value="subscription">Subscription</option>
+                        <option value="bill">Bill</option>
+                      </select>
+                    </td>
+                    <td>{s.cadence || "unknown"}</td>
+                    <td>${money(s.expectedAmount ?? s.amountMax ?? s.amountMin ?? 0)}</td>
+                    <td>{s.nextDate || "-"}</td>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={!!s.isActive}
+                        onChange={(e) => onToggleActive(s.id, e.target.checked)}
+                        disabled={busy || locked}
+                        title={locked ? "Upgrade to Pro to edit" : ""}
+                      />
+                    </td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button
+                        className="btn btnDanger"
+                        type="button"
+                        onClick={() => onDelete(s.id)}
+                        disabled={busy || locked}
+                        title={locked ? "Upgrade to Pro to delete" : ""}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13 }}>
+          Next step: we’ll auto-calc <b>nextDate</b> and show a “Upcoming charges (30 days)” widget on Dashboard.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------
    AI Modal
 ---------------------------- */
 
 function AiRuleModal({ open, loading, error, suggestion, tx, onClose, onConfirm }) {
   if (!open) return null;
+
+  const conf =
+    typeof suggestion?.confidence === "number"
+      ? suggestion.confidence > 1
+        ? suggestion.confidence
+        : suggestion.confidence * 100
+      : null;
 
   return (
     <div className="modalBackdrop">
@@ -972,9 +1374,9 @@ function AiRuleModal({ open, loading, error, suggestion, tx, onClose, onConfirm 
             <div>
               <b>Category:</b> {suggestion.category}
             </div>
-            {typeof suggestion.confidence === "number" && (
+            {conf != null && (
               <div>
-                <b>Confidence:</b> {(suggestion.confidence * 100).toFixed(0)}%
+                <b>Confidence:</b> {Number(conf).toFixed(0)}%
               </div>
             )}
             {(suggestion.reasoning || suggestion.reason) && (

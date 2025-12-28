@@ -9,6 +9,12 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import OpenAI from "openai";
+
+import prismaPkg from "@prisma/client";
+const { PrismaClient } = prismaPkg;
+
+import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+
 import {
   toISODate,
   addDays,
@@ -16,12 +22,6 @@ import {
   buildTimeline,
   summarize,
 } from "./forecast.js";
-
-
-import prismaPkg from "@prisma/client";
-const { PrismaClient } = prismaPkg;
-
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -40,22 +40,20 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PROD = NODE_ENV === "production";
 
 // --------------------
-// Prisma (SQLite Adapter)
+// Prisma (SQLite adapter)
 // --------------------
 const adapter = new PrismaBetterSqlite3({ url: DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
 // --------------------
-// Middleware: JSON
+// Middleware
 // --------------------
 app.use(express.json());
 
 // --------------------
 // CORS
-// - In production, set CLIENT_ORIGIN to your deployed frontend URL
-// - In dev, allow common localhost dev servers
 // --------------------
-const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN || "").trim(); // e.g. https://your-frontend.onrender.com
+const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN || "").trim(); // e.g. https://balanceary.app
 
 const DEV_ALLOWED = new Set([
   "http://localhost:5173",
@@ -67,7 +65,6 @@ const DEV_ALLOWED = new Set([
 function isAllowedOrigin(origin) {
   if (!origin) return true; // curl / server-to-server
   if (!IS_PROD) return DEV_ALLOWED.has(origin) || origin === CLIENT_ORIGIN;
-  // prod: require exact match to avoid wildcard + credentials issues
   return origin === CLIENT_ORIGIN;
 }
 
@@ -82,21 +79,21 @@ app.use(
 );
 
 // --------------------
-// Sessions: Persistent SQLite store (on Render disk)
-// NOTE: Use a disk path on Render like /var/data/sessions.db
+// Sessions: persistent SQLite store
 // --------------------
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev_secret_change_me";
-const SESSIONS_DB_PATH = process.env.SESSIONS_DB_PATH || "/var/data/sessions.db";
+const SESSIONS_DB_PATH =
+  process.env.SESSIONS_DB_PATH ||
+  (IS_PROD ? "/var/data/sessions.db" : "./sessions.db");
 
 const SqliteStore = SqliteStoreFactory(session);
 const sessionDb = new Database(SESSIONS_DB_PATH);
 
-// (Optional but recommended) Make the sessions DB a bit safer/faster
 try {
   sessionDb.pragma("journal_mode = WAL");
   sessionDb.pragma("synchronous = NORMAL");
 } catch {
-  // ignore if pragma fails in certain environments
+  // ignore
 }
 
 app.use(
@@ -110,8 +107,6 @@ app.use(
     proxy: true,
     cookie: {
       httpOnly: true,
-      // If your frontend is on a different domain (Render static site), you need:
-      // secure:true + sameSite:"none"
       secure: IS_PROD,
       sameSite: IS_PROD ? "none" : "lax",
       maxAge: 1000 * 60 * 60 * 24 * 14,
@@ -151,6 +146,34 @@ const forgotPasswordLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many password reset attempts. Try again later." },
 });
+
+function normalizeMerchant(desc) {
+  return String(desc || "")
+    .toLowerCase()
+    .replace(/(sq\*|paypal|visa|mastercard|debit|credit)/g, "")
+    .replace(/\b(inc|ltd|corp|co)\b/g, "")
+    .replace(/[^a-z0-9 ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function daysBetween(a, b) {
+  return Math.abs((new Date(a).getTime() - new Date(b).getTime()) / 86400000);
+}
+
+function prismaMissingTableError(e) {
+  // Prisma "table does not exist" is often P2021
+  return e?.code === "P2021" || String(e?.message || "").includes("does not exist");
+}
+
+function subscriptionsNotReady(res, e) {
+  console.error("Subscriptions tables missing / not migrated:", e);
+  return res.status(500).json({
+    error:
+      "Subscriptions tables are not in your database yet. Run Prisma migrate to create them (see terminal instructions).",
+    code: e?.code || "SUBSCRIPTIONS_NOT_MIGRATED",
+  });
+}
 
 // --------------------
 // OpenAI (optional)
@@ -245,7 +268,7 @@ app.post("/api/auth/logout", (req, res) => {
 app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
   try {
     const email = String(req.body.email || "").trim().toLowerCase();
-    res.json({ ok: true }); // always OK to prevent enumeration
+    res.json({ ok: true });
     if (!email.includes("@")) return;
 
     const user = await prisma.user.findUnique({ where: { email } });
@@ -715,7 +738,237 @@ app.post("/api/recurring/generate", requireAuth, async (req, res) => {
 });
 
 // --------------------
-// CSV Import (unchanged logic)
+// Subscriptions & Bills
+// --------------------
+
+// Detect candidates from transactions (merchant-based)
+app.get("/api/subscriptions/candidates", requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+
+    const txs = await prisma.transaction.findMany({
+      where: { userId, amount: { lt: 0 } },
+      orderBy: { date: "asc" },
+    });
+
+    // If the ignore table doesn't exist yet, just treat as none ignored (don’t crash)
+    let ignoredKeys = new Set();
+    try {
+      const ignored = await prisma.subscriptionIgnore.findMany({
+        where: { userId },
+        select: { merchantKey: true },
+      });
+      ignoredKeys = new Set(ignored.map((i) => i.merchantKey));
+    } catch (e) {
+      if (!prismaMissingTableError(e)) throw e;
+    }
+
+    const groups = {};
+    for (const t of txs) {
+      // ✅ FIX: model uses merchant (not description)
+      const key = normalizeMerchant(t.merchant || "");
+      if (!key || ignoredKeys.has(key)) continue;
+      groups[key] ||= [];
+      groups[key].push(t);
+    }
+
+    const candidates = [];
+
+    for (const [merchantKey, items] of Object.entries(groups)) {
+      if (items.length < 3) continue;
+
+      const gaps = [];
+      for (let i = 1; i < items.length; i++) {
+        gaps.push(daysBetween(items[i].date, items[i - 1].date));
+      }
+
+      const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+
+      // monthly-ish window
+      if (avgGap < 25 || avgGap > 35) continue;
+
+      const amounts = items
+        .map((i) => Math.abs(Number(i.amount) || 0))
+        .filter((n) => n > 0);
+
+      if (!amounts.length) continue;
+
+      const min = Math.min(...amounts);
+      const max = Math.max(...amounts);
+
+      // within 25% variance
+      if (min > 0 && max / min > 1.25) continue;
+
+      const confidence =
+        50 + Math.min(30, items.length * 5) + Math.max(0, 20 - Math.abs(30 - avgGap));
+
+      candidates.push({
+        merchantKey,
+        displayName: merchantKey.replace(/\b\w/g, (l) => l.toUpperCase()),
+        cadence: "monthly",
+        expectedAmount: Number((amounts.reduce((a, b) => a + b, 0) / amounts.length).toFixed(2)),
+        lastDate: items[items.length - 1].date,
+        confidence: Math.min(100, Math.round(confidence)),
+      });
+    }
+
+    res.json({ candidates });
+  } catch (e) {
+    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
+    console.error("GET /api/subscriptions/candidates failed:", e);
+    res.status(500).json({ error: "Failed to compute candidates" });
+  }
+});
+
+// List saved subscriptions/bills
+app.get("/api/subscriptions", requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+
+    const subscriptions = await prisma.subscription.findMany({
+      where: { userId },
+      orderBy: { updatedAt: "desc" },
+    });
+
+    res.json({ subscriptions });
+  } catch (e) {
+    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
+    console.error("GET /api/subscriptions failed:", e);
+    res.status(500).json({ error: "Failed to load subscriptions" });
+  }
+});
+
+// Create or update by unique (userId, merchantKey)
+app.post("/api/subscriptions", requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+
+    const payload = req.body || {};
+    const merchantKey = String(payload.merchantKey || "").trim();
+    if (!merchantKey) return res.status(400).json({ error: "merchantKey required" });
+
+    const data = {
+      userId,
+      merchantKey,
+      displayName: payload.displayName ? String(payload.displayName) : merchantKey,
+      cadence: payload.cadence ? String(payload.cadence) : "unknown",
+      expectedAmount: payload.expectedAmount == null ? null : Number(payload.expectedAmount),
+      amountMin: payload.amountMin == null ? null : Number(payload.amountMin),
+      amountMax: payload.amountMax == null ? null : Number(payload.amountMax),
+      lastDate: payload.lastDate ? String(payload.lastDate) : null,
+      nextDate: payload.nextDate ? String(payload.nextDate) : null,
+      confidence: payload.confidence == null ? 0 : Number(payload.confidence),
+      isActive: payload.isActive == null ? true : Boolean(payload.isActive),
+      kind: payload.kind ? String(payload.kind) : "subscription",
+      categoryId: payload.categoryId ? String(payload.categoryId) : null,
+      notes: payload.notes ? String(payload.notes) : null,
+    };
+
+    const subscription = await prisma.subscription.upsert({
+      where: { userId_merchantKey: { userId, merchantKey } },
+      create: data,
+      update: data,
+    });
+
+    res.json({ subscription });
+  } catch (e) {
+    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
+    console.error("POST /api/subscriptions failed:", e);
+    res.status(500).json({ error: "Failed to save subscription" });
+  }
+});
+
+// Patch fields
+app.patch("/api/subscriptions/:id", requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const id = String(req.params.id);
+
+    const patch = req.body || {};
+    const allowed = [
+      "displayName",
+      "cadence",
+      "expectedAmount",
+      "amountMin",
+      "amountMax",
+      "lastDate",
+      "nextDate",
+      "confidence",
+      "isActive",
+      "kind",
+      "categoryId",
+      "notes",
+    ];
+
+    const data = {};
+    for (const k of allowed) {
+      if (patch[k] === undefined) continue;
+      if (k === "expectedAmount" || k === "amountMin" || k === "amountMax") {
+        data[k] = patch[k] == null ? null : Number(patch[k]);
+      } else if (k === "confidence") {
+        data[k] = patch[k] == null ? 0 : Number(patch[k]);
+      } else if (k === "isActive") {
+        data[k] = Boolean(patch[k]);
+      } else if (k === "lastDate" || k === "nextDate") {
+        data[k] = patch[k] ? String(patch[k]) : null;
+      } else {
+        data[k] = patch[k] == null ? null : String(patch[k]);
+      }
+    }
+
+    const updated = await prisma.subscription.updateMany({
+      where: { id, userId },
+      data,
+    });
+
+    if (!updated.count) return res.status(404).json({ error: "Not found" });
+
+    const subscription = await prisma.subscription.findFirst({ where: { id, userId } });
+    res.json({ subscription });
+  } catch (e) {
+    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
+    console.error("PATCH /api/subscriptions/:id failed:", e);
+    res.status(500).json({ error: "Failed to update subscription" });
+  }
+});
+
+app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const id = String(req.params.id);
+
+    await prisma.subscription.deleteMany({ where: { id, userId } });
+    res.json({ ok: true });
+  } catch (e) {
+    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
+    console.error("DELETE /api/subscriptions/:id failed:", e);
+    res.status(500).json({ error: "Failed to delete subscription" });
+  }
+});
+
+// Ignore merchantKey (stop showing in candidates)
+app.post("/api/subscriptions/ignore", requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId;
+    const merchantKey = String(req.body?.merchantKey || "").trim();
+    if (!merchantKey) return res.status(400).json({ error: "merchantKey required" });
+
+    await prisma.subscriptionIgnore.upsert({
+      where: { userId_merchantKey: { userId, merchantKey } },
+      create: { userId, merchantKey },
+      update: {}, // nothing
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    if (prismaMissingTableError(e)) return subscriptionsNotReady(res, e);
+    console.error("POST /api/subscriptions/ignore failed:", e);
+    res.status(500).json({ error: "Failed to ignore merchant" });
+  }
+});
+
+// --------------------
+// CSV Import (same logic you had)
 // --------------------
 function toStr(v) {
   return v == null ? "" : String(v).trim();
@@ -859,7 +1112,7 @@ app.post("/api/import/csv", requireAuth, async (req, res) => {
 });
 
 // --------------------
-// Insights
+// Insights (unchanged)
 // --------------------
 app.get("/insights", async (req, res) => {
   try {
@@ -968,42 +1221,30 @@ app.get("/insights", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+// --------------------
+// Forecast (unchanged)
+// --------------------
 app.get("/api/forecast", async (req, res) => {
   try {
-    // If you enforce auth elsewhere, keep consistent with your app.
-    // Example:
     if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
 
     const userId = req.session.userId;
 
-    const days = Math.max(7, Math.min(90, Number(req.query.days || 30))); // clamp 7..90
+    const days = Math.max(7, Math.min(90, Number(req.query.days || 30)));
     const startISO = toISODate(new Date());
     const endISO = toISODate(addDays(new Date(), days - 1));
 
-    // 1) Opening balance (simple + reliable):
-    // Sum all transactions up to today. If you have a "startingBalance" concept, add it here.
     const agg = await prisma.transaction.aggregate({
-      where: {
-        userId,
-        date: { lte: startISO },
-      },
+      where: { userId, date: { lte: startISO } },
       _sum: { amount: true },
     });
 
     const openingBalance = Number(agg?._sum?.amount || 0);
 
-    // 2) Future one-off transactions already entered (optional but very useful)
     const futureTx = await prisma.transaction.findMany({
-      where: {
-        userId,
-        date: { gte: startISO, lte: endISO },
-      },
-      select: {
-        id: true,
-        date: true,
-        description: true,
-        amount: true,
-      },
+      where: { userId, date: { gte: startISO, lte: endISO } },
+      select: { id: true, date: true, amount: true },
       orderBy: [{ date: "asc" }],
     });
 
@@ -1012,25 +1253,15 @@ app.get("/api/forecast", async (req, res) => {
       transactionId: t.id,
       date: t.date,
       amount: Number(t.amount) || 0,
-      description: t.description || "Transaction",
+      description: "Transaction",
     }));
 
-    // 3) Recurring events
     const recurring = await prisma.recurring.findMany({
-      where: { userId, active: true },
-      select: {
-        id: true,
-        description: true,
-        amount: true,
-        cadence: true,
-        nextDate: true,
-        active: true,
-      },
+      where: { userId, isActive: true },
     });
 
     const recurringEvents = expandRecurring(recurring, startISO, endISO);
 
-    // 4) Build timeline
     const allEvents = [...txEvents, ...recurringEvents];
 
     const { timeline, lowestBalance, lowestDate } = buildTimeline({
@@ -1057,6 +1288,7 @@ app.get("/api/forecast", async (req, res) => {
     res.status(500).json({ error: "Forecast failed" });
   }
 });
+
 // --------------------
 // AI: Rule suggestion
 // --------------------
@@ -1134,4 +1366,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`API running on port ${PORT}`);
   console.log(`NODE_ENV: ${NODE_ENV}`);
   console.log(`CLIENT_ORIGIN: ${CLIENT_ORIGIN || "(not set)"}`);
+  console.log(`DATABASE_URL: ${DATABASE_URL}`);
+  console.log(`SESSIONS_DB_PATH: ${SESSIONS_DB_PATH}`);
 });

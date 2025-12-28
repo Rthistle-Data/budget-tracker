@@ -152,8 +152,6 @@ export const deleteCategory = (id) =>
 
 /* ---------------------------
    Rules
-   NOTE: Your backend expects { match, category }
-   (not contains/categoryId/name)
 ---------------------------- */
 
 export const getRules = () => apiFetch("/api/rules");
@@ -208,6 +206,37 @@ export const generateRecurring = (month) =>
   });
 
 /* ---------------------------
+   Subscriptions / Bills
+---------------------------- */
+
+export const getSubscriptionCandidates = () => apiFetch("/api/subscriptions/candidates");
+
+export const getSubscriptions = () => apiFetch("/api/subscriptions");
+
+export const saveSubscription = (payload) =>
+  apiFetch("/api/subscriptions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+export const ignoreSubscriptionCandidate = (merchantKey) =>
+  apiFetch("/api/subscriptions/ignore", {
+    method: "POST",
+    body: JSON.stringify({ merchantKey }),
+  });
+
+export const updateSubscription = (id, patch) =>
+  apiFetch(`/api/subscriptions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const deleteSubscription = (id) =>
+  apiFetch(`/api/subscriptions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+/* ---------------------------
    CSV Import
 ---------------------------- */
 
@@ -233,8 +262,12 @@ export const getInsights = (month) => {
   return apiFetch(`/insights?month=${encodeURIComponent(month)}`);
 };
 
+/* ---------------------------
+   Forecast
+---------------------------- */
+
 export async function getForecast(days = 30) {
-  const res = await fetch(`/api/forecast?days=${days}`, {
+  const res = await fetch(`${API_BASE}/api/forecast?days=${encodeURIComponent(days)}`, {
     credentials: "include",
   });
   if (!res.ok) throw new Error(await res.text());

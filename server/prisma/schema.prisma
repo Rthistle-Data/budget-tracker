@@ -4,15 +4,13 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
-
+  // Prisma 7: DO NOT put url/env here anymore.
+  // Connection URL is configured in prisma.config.ts instead.
 }
-
-
 
 model Transaction {
   id        String   @id @default(cuid())
-  date      String // YYYY-MM-DD
+  date      String   // YYYY-MM-DD
   amount    Float
   category  String
   merchant  String
@@ -20,23 +18,23 @@ model Transaction {
   note      String   @default("")
   createdAt DateTime @default(now())
 
-  // ✅ CSV import helpers
-  // importHash = stable hash of the raw row (or normalized signature) for dedupe
+  // CSV import helpers
   importHash String?
-  // source examples: "csv", "manual", "recurring"
+  // "csv" | "manual" | "recurring"
   source     String?
 
-  // ✅ recurring exact linking (portfolio-grade)
+  // recurring exact linking
   recurringId String?
   recurring   Recurring? @relation(fields: [recurringId], references: [id], onDelete: SetNull)
 
   // auth scoping
   userId String?
-  user   User?   @relation(fields: [userId], references: [id])
+  user   User? @relation(fields: [userId], references: [id])
 
-  // ✅ Dedupe: allow multiple nulls, but prevent duplicates when importHash is set
+  // allow multiple nulls, but prevent duplicates when importHash is set
   @@unique([userId, importHash])
-  // ✅ Helpful query performance
+
+  // Helpful query performance
   @@index([userId, date])
   @@index([userId, category])
   @@index([userId, merchant])
@@ -50,7 +48,7 @@ model Budget {
   amount   Float
 
   userId String?
-  user   User?   @relation(fields: [userId], references: [id])
+  user   User? @relation(fields: [userId], references: [id])
 
   @@unique([userId, month, category])
   @@index([userId, month])
@@ -62,7 +60,7 @@ model Category {
   createdAt DateTime @default(now())
 
   userId String?
-  user   User?   @relation(fields: [userId], references: [id])
+  user   User? @relation(fields: [userId], references: [id])
 
   @@unique([userId, name])
   @@index([userId])
@@ -70,12 +68,12 @@ model Category {
 
 model Rule {
   id        String   @id @default(cuid())
-  match     String // substring to look for (store lowercase)
-  category  String // category to assign
+  match     String   // substring to look for (store lowercase)
+  category  String   // category to assign
   createdAt DateTime @default(now())
 
   userId String?
-  user   User?   @relation(fields: [userId], references: [id])
+  user   User? @relation(fields: [userId], references: [id])
 
   @@index([userId])
   @@index([userId, createdAt])
@@ -89,14 +87,14 @@ model Recurring {
   merchant   String
   account    String
   note       String   @default("")
-  dayOfMonth Int // 1..28
+  dayOfMonth Int      // 1..28
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
 
   userId String?
-  user   User?   @relation(fields: [userId], references: [id])
+  user   User? @relation(fields: [userId], references: [id])
 
-  // ✅ Back relation (paired with Transaction.recurringId)
+  // Back relation (paired with Transaction.recurringId)
   transactions Transaction[]
 
   @@index([userId])
@@ -116,18 +114,65 @@ model User {
   categories   Category[]
   rules        Rule[]
   recurring    Recurring[]
+
+  // ✅ NEW: back-relations for subscriptions
+  subscriptions       Subscription[]
+  subscriptionIgnores SubscriptionIgnore[]
 }
 
 model PasswordResetToken {
-  id        String    @id @default(cuid())
-  tokenHash String    @unique
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
   userId    String
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime  @default(now())
+  createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+model Subscription {
+  id             String   @id @default(uuid())
+  userId         String
+  merchantKey    String   // normalized merchant identifier
+  displayName    String   // user-friendly name
+  cadence        String   // weekly | monthly | quarterly | yearly | unknown
+  expectedAmount Float?
+  amountMin      Float?
+  amountMax      Float?
+  lastDate       String?  // YYYY-MM-DD
+  nextDate       String?  // YYYY-MM-DD
+  confidence     Int      @default(0) // 0-100
+  isActive       Boolean  @default(true)
+  kind           String   @default("subscription") // subscription | bill
+  categoryId     String?
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // ✅ NEW: relation to User
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // IMPORTANT: required for upsert by (userId, merchantKey)
+  @@unique([userId, merchantKey])
+
+  @@index([userId])
+  @@index([userId, isActive])
+  @@index([userId, nextDate])
+}
+
+model SubscriptionIgnore {
+  id          String   @id @default(uuid())
+  userId      String
+  merchantKey String
+  createdAt   DateTime @default(now())
+
+  // ✅ NEW: relation to User
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, merchantKey])
+  @@index([userId])
 }
