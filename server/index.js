@@ -5,18 +5,15 @@ import "dotenv/config";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
-import { createRequire } from "module";
+import path from "node:path";
+import Database from "better-sqlite3";
+import SqliteStoreFactory from "better-sqlite3-session-store";
+import session from "express-session";
 
 import pkg from "@prisma/client";
 const { PrismaClient } = pkg;
 
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
-
-// ------------------------------------
-// CJS deps (Node 20/24 + ESM safe)
-// ------------------------------------
-const require = createRequire(import.meta.url);
-const session = require("express-session");
 
 // ------------------------------------
 // App
@@ -83,28 +80,49 @@ const adapter = new PrismaBetterSqlite3({
 const prisma = new PrismaClient({ adapter });
 
 /* ---------------------------
-   Sessions
+   Sessions (SQLite-backed, production-safe)
 ---------------------------- */
 app.set("trust proxy", 1);
+
+// Build sqlite session store
+const SqliteStore = SqliteStoreFactory(session);
+
+// Use Render disk in prod, local file in dev
+const sessionsPath =
+  process.env.SESSIONS_DB_PATH ||
+  (process.env.NODE_ENV === "production" ? "/var/data/sessions.db" : path.resolve(process.cwd(), "sessions.db"));
+
+const sessionDb = new Database(sessionsPath);
+
+// Cookies:
+// - In production (cross-site: balanceary.app -> onrender.com): sameSite="none" + secure=true
+// - In local dev over http: sameSite="lax" + secure=false
+const isProd = process.env.NODE_ENV === "production";
+const cookieSameSite = isProd ? "none" : "lax";
+const cookieSecure = isProd ? true : false;
+
+if (!process.env.SESSION_SECRET) {
+  console.warn("⚠️ SESSION_SECRET is not set. Set it in Render env vars (required for production).");
+}
 
 app.use(
   session({
     name: "balanceary.sid",
-    secret: process.env.SESSION_SECRET,
+    secret: process.env.SESSION_SECRET || "dev-secret-change-me",
     resave: false,
     saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      secure: true,          // REQUIRED for HTTPS
-      sameSite: "none",      // REQUIRED for cross-site cookies
-      maxAge: 1000 * 60 * 60 * 24 * 30,
-    },
+    rolling: true,
     store: new SqliteStore({
       client: sessionDb,
     }),
+    cookie: {
+      httpOnly: true,
+      secure: cookieSecure,
+      sameSite: cookieSameSite,
+      maxAge: 1000 * 60 * 60 * 24 * 30,
+    },
   })
 );
-
 
 /* ---------------------------
    Helpers
@@ -190,7 +208,6 @@ function normalizeForMatch(s) {
 }
 
 function sortRulesBestFirst(rules) {
-  // longest match wins (more specific)
   return (rules || [])
     .slice()
     .sort((a, b) => String(b.match || "").length - String(a.match || "").length);
@@ -217,6 +234,8 @@ async function autoCategoryForMerchant(userId, merchant) {
   const rules = sortRulesBestFirst(rulesRaw);
   return categoryFromRules(rules, merchant) || "Uncategorized";
 }
+
+// ✅ keep the rest of your routes exactly as you already have them below this line...
 
 /* ---------------------------
    Recurring helpers
